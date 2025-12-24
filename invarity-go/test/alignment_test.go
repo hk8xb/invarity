@@ -7,44 +7,26 @@ import (
 	"invarity/internal/types"
 )
 
-func TestAggregateVotes_AnyDenyIsDeny(t *testing.T) {
+func TestAggregateIntentVotes_AllDenyIsDeny(t *testing.T) {
 	tests := []struct {
 		name     string
-		voters   []types.AlignmentVoter
-		expected types.Vote
+		voters   []types.IntentVoterResult
+		expected types.IntentDecision
 	}{
-		{
-			name: "single deny",
-			voters: []types.AlignmentVoter{
-				{VoterID: "v1", Vote: types.VoteAllow},
-				{VoterID: "v2", Vote: types.VoteDeny},
-				{VoterID: "v3", Vote: types.VoteAllow},
-			},
-			expected: types.VoteDeny,
-		},
 		{
 			name: "all deny",
-			voters: []types.AlignmentVoter{
-				{VoterID: "v1", Vote: types.VoteDeny},
-				{VoterID: "v2", Vote: types.VoteDeny},
-				{VoterID: "v3", Vote: types.VoteDeny},
+			voters: []types.IntentVoterResult{
+				{VoterID: "v1", Vote: types.IntentVoteDeny},
+				{VoterID: "v2", Vote: types.IntentVoteDeny},
+				{VoterID: "v3", Vote: types.IntentVoteDeny},
 			},
-			expected: types.VoteDeny,
-		},
-		{
-			name: "deny overrides escalate",
-			voters: []types.AlignmentVoter{
-				{VoterID: "v1", Vote: types.VoteEscalate},
-				{VoterID: "v2", Vote: types.VoteDeny},
-				{VoterID: "v3", Vote: types.VoteEscalate},
-			},
-			expected: types.VoteDeny,
+			expected: types.IntentDecisionDeny,
 		},
 	}
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			result := llm.AggregateVotes(tt.voters)
+			result := llm.AggregateIntentVotes(tt.voters)
 			if result != tt.expected {
 				t.Errorf("got %s, want %s", result, tt.expected)
 			}
@@ -52,44 +34,35 @@ func TestAggregateVotes_AnyDenyIsDeny(t *testing.T) {
 	}
 }
 
-func TestAggregateVotes_MajorityAllow(t *testing.T) {
+func TestAggregateIntentVotes_AnyDenyIsEscalate(t *testing.T) {
 	tests := []struct {
 		name     string
-		voters   []types.AlignmentVoter
-		expected types.Vote
+		voters   []types.IntentVoterResult
+		expected types.IntentDecision
 	}{
 		{
-			name: "all allow",
-			voters: []types.AlignmentVoter{
-				{VoterID: "v1", Vote: types.VoteAllow},
-				{VoterID: "v2", Vote: types.VoteAllow},
-				{VoterID: "v3", Vote: types.VoteAllow},
+			name: "single deny among safe",
+			voters: []types.IntentVoterResult{
+				{VoterID: "v1", Vote: types.IntentVoteSafe},
+				{VoterID: "v2", Vote: types.IntentVoteDeny},
+				{VoterID: "v3", Vote: types.IntentVoteSafe},
 			},
-			expected: types.VoteAllow,
+			expected: types.IntentDecisionEscalate,
 		},
 		{
-			name: "2 of 3 allow",
-			voters: []types.AlignmentVoter{
-				{VoterID: "v1", Vote: types.VoteAllow},
-				{VoterID: "v2", Vote: types.VoteAllow},
-				{VoterID: "v3", Vote: types.VoteEscalate},
+			name: "deny with abstain",
+			voters: []types.IntentVoterResult{
+				{VoterID: "v1", Vote: types.IntentVoteAbstain},
+				{VoterID: "v2", Vote: types.IntentVoteDeny},
+				{VoterID: "v3", Vote: types.IntentVoteSafe},
 			},
-			expected: types.VoteAllow,
-		},
-		{
-			name: "exactly 2 allow",
-			voters: []types.AlignmentVoter{
-				{VoterID: "v1", Vote: types.VoteAllow},
-				{VoterID: "v2", Vote: types.VoteEscalate},
-				{VoterID: "v3", Vote: types.VoteAllow},
-			},
-			expected: types.VoteAllow,
+			expected: types.IntentDecisionEscalate,
 		},
 	}
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			result := llm.AggregateVotes(tt.voters)
+			result := llm.AggregateIntentVotes(tt.voters)
 			if result != tt.expected {
 				t.Errorf("got %s, want %s", result, tt.expected)
 			}
@@ -97,44 +70,26 @@ func TestAggregateVotes_MajorityAllow(t *testing.T) {
 	}
 }
 
-func TestAggregateVotes_Escalate(t *testing.T) {
+func TestAggregateIntentVotes_AllSafeIsSafe(t *testing.T) {
 	tests := []struct {
 		name     string
-		voters   []types.AlignmentVoter
-		expected types.Vote
+		voters   []types.IntentVoterResult
+		expected types.IntentDecision
 	}{
 		{
-			name: "all escalate",
-			voters: []types.AlignmentVoter{
-				{VoterID: "v1", Vote: types.VoteEscalate},
-				{VoterID: "v2", Vote: types.VoteEscalate},
-				{VoterID: "v3", Vote: types.VoteEscalate},
+			name: "all safe",
+			voters: []types.IntentVoterResult{
+				{VoterID: "v1", Vote: types.IntentVoteSafe},
+				{VoterID: "v2", Vote: types.IntentVoteSafe},
+				{VoterID: "v3", Vote: types.IntentVoteSafe},
 			},
-			expected: types.VoteEscalate,
-		},
-		{
-			name: "1 allow 2 escalate",
-			voters: []types.AlignmentVoter{
-				{VoterID: "v1", Vote: types.VoteAllow},
-				{VoterID: "v2", Vote: types.VoteEscalate},
-				{VoterID: "v3", Vote: types.VoteEscalate},
-			},
-			expected: types.VoteEscalate,
-		},
-		{
-			name: "no majority allow",
-			voters: []types.AlignmentVoter{
-				{VoterID: "v1", Vote: types.VoteAllow},
-				{VoterID: "v2", Vote: types.VoteEscalate},
-				{VoterID: "v3", Vote: types.VoteEscalate},
-			},
-			expected: types.VoteEscalate,
+			expected: types.IntentDecisionSafe,
 		},
 	}
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			result := llm.AggregateVotes(tt.voters)
+			result := llm.AggregateIntentVotes(tt.voters)
 			if result != tt.expected {
 				t.Errorf("got %s, want %s", result, tt.expected)
 			}
@@ -142,25 +97,68 @@ func TestAggregateVotes_Escalate(t *testing.T) {
 	}
 }
 
-func TestAggregateVotes_EdgeCases(t *testing.T) {
+func TestAggregateIntentVotes_AnyAbstainIsEscalate(t *testing.T) {
+	tests := []struct {
+		name     string
+		voters   []types.IntentVoterResult
+		expected types.IntentDecision
+	}{
+		{
+			name: "single abstain among safe",
+			voters: []types.IntentVoterResult{
+				{VoterID: "v1", Vote: types.IntentVoteSafe},
+				{VoterID: "v2", Vote: types.IntentVoteAbstain},
+				{VoterID: "v3", Vote: types.IntentVoteSafe},
+			},
+			expected: types.IntentDecisionEscalate,
+		},
+		{
+			name: "all abstain",
+			voters: []types.IntentVoterResult{
+				{VoterID: "v1", Vote: types.IntentVoteAbstain},
+				{VoterID: "v2", Vote: types.IntentVoteAbstain},
+				{VoterID: "v3", Vote: types.IntentVoteAbstain},
+			},
+			expected: types.IntentDecisionEscalate,
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			result := llm.AggregateIntentVotes(tt.voters)
+			if result != tt.expected {
+				t.Errorf("got %s, want %s", result, tt.expected)
+			}
+		})
+	}
+}
+
+func TestAggregateIntentVotes_EdgeCases(t *testing.T) {
 	// Empty voters should escalate (safe default)
-	result := llm.AggregateVotes([]types.AlignmentVoter{})
-	if result != types.VoteEscalate {
-		t.Errorf("empty voters: got %s, want ESCALATE", result)
+	result := llm.AggregateIntentVotes([]types.IntentVoterResult{})
+	if result != types.IntentDecisionEscalate {
+		t.Errorf("empty voters: got %s, want ESCALATE (safe default)", result)
 	}
 
 	// Single voter scenarios
-	singleAllow := llm.AggregateVotes([]types.AlignmentVoter{
-		{VoterID: "v1", Vote: types.VoteAllow},
+	singleSafe := llm.AggregateIntentVotes([]types.IntentVoterResult{
+		{VoterID: "v1", Vote: types.IntentVoteSafe},
 	})
-	if singleAllow != types.VoteEscalate {
-		t.Errorf("single allow: got %s, want ESCALATE (no majority)", singleAllow)
+	if singleSafe != types.IntentDecisionSafe {
+		t.Errorf("single safe: got %s, want SAFE", singleSafe)
 	}
 
-	singleDeny := llm.AggregateVotes([]types.AlignmentVoter{
-		{VoterID: "v1", Vote: types.VoteDeny},
+	singleDeny := llm.AggregateIntentVotes([]types.IntentVoterResult{
+		{VoterID: "v1", Vote: types.IntentVoteDeny},
 	})
-	if singleDeny != types.VoteDeny {
+	if singleDeny != types.IntentDecisionDeny {
 		t.Errorf("single deny: got %s, want DENY", singleDeny)
+	}
+
+	singleAbstain := llm.AggregateIntentVotes([]types.IntentVoterResult{
+		{VoterID: "v1", Vote: types.IntentVoteAbstain},
+	})
+	if singleAbstain != types.IntentDecisionEscalate {
+		t.Errorf("single abstain: got %s, want ESCALATE", singleAbstain)
 	}
 }

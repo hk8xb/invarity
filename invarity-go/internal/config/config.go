@@ -26,6 +26,11 @@ type Config struct {
 	QwenBaseURL          string
 	QwenAPIKey           string
 
+	// Intent alignment model (RunPod)
+	IntentModelEndpoint string
+	IntentModelAPIKey   string
+	IntentModelTimeout  time.Duration
+
 	// Request limits
 	RequestMaxBytes  int
 	MaxContextChars  int
@@ -52,6 +57,9 @@ func DefaultConfig() *Config {
 		LlamaGuardAPIKey:     "",
 		QwenBaseURL:          "http://localhost:8003/v1",
 		QwenAPIKey:           "",
+		IntentModelEndpoint:  "", // Set via INTENT_MODEL_ENDPOINT env var
+		IntentModelAPIKey:    "",
+		IntentModelTimeout:   1500 * time.Millisecond,
 		RequestMaxBytes:      1 << 20, // 1MB
 		MaxContextChars:      32000,
 		MaxIntentChars:       4000,
@@ -107,6 +115,22 @@ func LoadFromEnv() (*Config, error) {
 
 	if v := os.Getenv("QWEN_API_KEY"); v != "" {
 		cfg.QwenAPIKey = v
+	}
+
+	if v := os.Getenv("INTENT_MODEL_ENDPOINT"); v != "" {
+		cfg.IntentModelEndpoint = v
+	}
+
+	if v := os.Getenv("INTENT_MODEL_API_KEY"); v != "" {
+		cfg.IntentModelAPIKey = v
+	}
+
+	if v := os.Getenv("INTENT_MODEL_TIMEOUT_MS"); v != "" {
+		timeout, err := strconv.Atoi(v)
+		if err != nil {
+			return nil, fmt.Errorf("invalid INTENT_MODEL_TIMEOUT_MS: %w", err)
+		}
+		cfg.IntentModelTimeout = time.Duration(timeout) * time.Millisecond
 	}
 
 	if v := os.Getenv("REQUEST_MAX_BYTES"); v != "" {

@@ -31,43 +31,52 @@ import (
 // S7: Policy DSL Pass 2 (conditional: if arbiter ran)
 // S8: Aggregate Decision (deterministic)
 type Pipeline struct {
-	cfg              *config.Config
-	logger           *zap.Logger
-	registryStore    registry.Store
-	policyStore      policy.Store
-	auditStore       audit.Store
-	schemaValidator  *registry.SchemaValidator
-	policyEvaluator  *policy.Evaluator
-	alignmentQuorum  *llm.AlignmentQuorum
-	threatSentinel   *llm.ThreatSentinel
-	policyArbiter    *llm.PolicyArbiter
+	cfg             *config.Config
+	logger          *zap.Logger
+	registryStore   registry.Store
+	policyStore     policy.Store
+	auditStore      audit.Store
+	schemaValidator *registry.SchemaValidator
+	policyEvaluator *policy.Evaluator
+	intentQuorum    *llm.IntentQuorum
+	threatSentinel  *llm.ThreatSentinel
+	policyArbiter   *llm.PolicyArbiter
 }
 
 // PipelineConfig holds dependencies for the pipeline.
 type PipelineConfig struct {
-	Config          *config.Config
-	Logger          *zap.Logger
-	RegistryStore   registry.Store
-	PolicyStore     policy.Store
-	AuditStore      audit.Store
-	AlignmentClient *llm.Client
-	ThreatClient    *llm.Client
-	ArbiterClient   *llm.Client
+	Config        *config.Config
+	Logger        *zap.Logger
+	RegistryStore registry.Store
+	PolicyStore   policy.Store
+	AuditStore    audit.Store
+	// All LLM clients use RunPod endpoints
+	AlignmentClient *llm.Client // Intent alignment quorum
+	ThreatClient    *llm.Client // Threat sentinel
+	ArbiterClient   *llm.Client // Policy arbiter
 }
 
 // NewPipeline creates a new firewall pipeline.
 func NewPipeline(cfg PipelineConfig) *Pipeline {
+	// Create intent quorum config with timeout from config
+	var intentQuorumCfg *llm.IntentQuorumConfig
+	if cfg.Config.IntentModelTimeout > 0 {
+		intentQuorumCfg = &llm.IntentQuorumConfig{
+			VoterTimeout: cfg.Config.IntentModelTimeout,
+		}
+	}
+
 	return &Pipeline{
-		cfg:              cfg.Config,
-		logger:           cfg.Logger,
-		registryStore:    cfg.RegistryStore,
-		policyStore:      cfg.PolicyStore,
-		auditStore:       cfg.AuditStore,
-		schemaValidator:  registry.NewSchemaValidator(),
-		policyEvaluator:  policy.NewEvaluator(cfg.PolicyStore),
-		alignmentQuorum:  llm.NewAlignmentQuorum(cfg.AlignmentClient, nil),
-		threatSentinel:   llm.NewThreatSentinel(cfg.ThreatClient),
-		policyArbiter:    llm.NewPolicyArbiter(cfg.ArbiterClient),
+		cfg:             cfg.Config,
+		logger:          cfg.Logger,
+		registryStore:   cfg.RegistryStore,
+		policyStore:     cfg.PolicyStore,
+		auditStore:      cfg.AuditStore,
+		schemaValidator: registry.NewSchemaValidator(),
+		policyEvaluator: policy.NewEvaluator(cfg.PolicyStore),
+		intentQuorum:    llm.NewIntentQuorum(cfg.AlignmentClient, intentQuorumCfg),
+		threatSentinel:  llm.NewThreatSentinel(cfg.ThreatClient),
+		policyArbiter:   llm.NewPolicyArbiter(cfg.ArbiterClient),
 	}
 }
 
@@ -79,7 +88,7 @@ type PipelineState struct {
 	RiskResult    *risk.ComputeResult
 	PolicyResult1 *policy.EvaluationResult
 	PolicyResult2 *policy.EvaluationResult
-	Alignment     *types.AlignmentResult
+	Alignment     *types.IntentAlignmentResult
 	Threat        *types.ThreatResult
 	Arbiter       *types.ArbiterResult
 	Timing        *types.PipelineTiming
@@ -126,17 +135,18 @@ func (p *Pipeline) Evaluate(ctx context.Context, req *types.ToolCallRequest) (*t
 		return p.buildDenyResponse(state, "S3_POLICY_PASS1", state.PolicyResult1.DenyReasons...)
 	}
 
-	// S4: Intention Alignment Quorum (ALWAYS-ON)
-	if err := p.stepAlignmentQuorum(ctx, state); err != nil {
-		logger.Warn("alignment quorum error", zap.Error(err))
+	// S4: Intent Alignment Quorum (ALWAYS-ON)
+	if err := p.stepIntentAlignment(ctx, state); err != nil {
+		logger.Warn("intent alignment quorum error", zap.Error(err))
 		// On error, default to ESCALATE
-		state.Alignment = &types.AlignmentResult{
-			AggregatedVote: types.VoteEscalate,
+		state.Alignment = &types.IntentAlignmentResult{
+			Decision: types.IntentDecisionEscalate,
 		}
-		state.Reasons = append(state.Reasons, "alignment_error")
+		state.Reasons = append(state.Reasons, "intent_alignment_error")
 	}
-	if state.Alignment != nil && state.Alignment.AggregatedVote == types.VoteDeny {
-		return p.buildDenyResponse(state, "S4_ALIGNMENT", "alignment_quorum_deny")
+	// Check intent alignment decision
+	if state.Alignment != nil && state.Alignment.Decision == types.IntentDecisionDeny {
+		return p.buildDenyResponse(state, "S4_INTENT_ALIGNMENT", "intent_quorum_deny")
 	}
 
 	// S5: Threat Sentinel (conditional: base_risk >= MEDIUM)
@@ -296,14 +306,14 @@ func (p *Pipeline) stepPolicyPass1(ctx context.Context, state *PipelineState) er
 	return nil
 }
 
-// S4: Intention Alignment Quorum
-func (p *Pipeline) stepAlignmentQuorum(ctx context.Context, state *PipelineState) error {
+// S4: Intent Alignment Quorum
+func (p *Pipeline) stepIntentAlignment(ctx context.Context, state *PipelineState) error {
 	start := time.Now()
 	defer func() {
 		state.Timing.Alignment = types.Duration(time.Since(start))
 	}()
 
-	result, err := p.alignmentQuorum.Run(ctx, &llm.AlignmentRequest{
+	result, err := p.intentQuorum.Run(ctx, &llm.IntentQuorumRequest{
 		UserIntent:  state.Request.UserIntent,
 		ToolCall:    state.Request.ToolCall,
 		Tool:        state.Tool,
@@ -318,9 +328,9 @@ func (p *Pipeline) stepAlignmentQuorum(ctx context.Context, state *PipelineState
 
 	state.Alignment = result
 
-	// Collect reason codes from voters
+	// Collect reasons from voters (for audit logging)
 	for _, voter := range result.Voters {
-		state.Reasons = append(state.Reasons, voter.ReasonCodes...)
+		state.Reasons = append(state.Reasons, voter.Reasons...)
 	}
 
 	return nil
@@ -438,10 +448,10 @@ func (p *Pipeline) stepAggregateDecision(ctx context.Context, state *PipelineSta
 	// Check for ESCALATE signals
 	escalate := false
 
-	// Alignment escalate
-	if state.Alignment != nil && state.Alignment.AggregatedVote == types.VoteEscalate {
+	// Intent alignment escalate
+	if state.Alignment != nil && state.Alignment.Decision == types.IntentDecisionEscalate {
 		escalate = true
-		state.Reasons = append(state.Reasons, "alignment_escalate")
+		state.Reasons = append(state.Reasons, "intent_alignment_escalate")
 	}
 
 	// Threat suspicious
@@ -577,7 +587,7 @@ func (p *Pipeline) buildResponse(state *PipelineState) (*types.FirewallDecisionR
 		}
 	}
 
-	// Add alignment result
+	// Add intent alignment result
 	resp.Alignment = state.Alignment
 
 	// Add threat result

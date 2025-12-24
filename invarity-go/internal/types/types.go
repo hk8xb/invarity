@@ -69,6 +69,25 @@ const (
 	VoteDeny     Vote = "DENY"
 )
 
+// IntentVote represents an intent alignment voter's decision.
+// This is distinct from Vote to support the SAFE/DENY/ABSTAIN semantics.
+type IntentVote string
+
+const (
+	IntentVoteSafe    IntentVote = "SAFE"
+	IntentVoteDeny    IntentVote = "DENY"
+	IntentVoteAbstain IntentVote = "ABSTAIN"
+)
+
+// IntentDecision represents the final intent alignment decision.
+type IntentDecision string
+
+const (
+	IntentDecisionSafe     IntentDecision = "SAFE"
+	IntentDecisionEscalate IntentDecision = "ESCALATE"
+	IntentDecisionDeny     IntentDecision = "DENY"
+)
+
 // Environment represents the deployment environment.
 type Environment string
 
@@ -116,20 +135,33 @@ type ToolCallRequest struct {
 	Timestamp      time.Time       `json:"timestamp,omitempty"`
 }
 
-// AlignmentVoter represents a single voter's result.
-type AlignmentVoter struct {
-	VoterID     string   `json:"voter_id"`
-	Vote        Vote     `json:"vote"`
-	Confidence  float64  `json:"confidence"`
-	ReasonCodes []string `json:"reason_codes"`
-	Latency     Duration `json:"latency_ms"`
+// IntentVoterResult represents a single intent voter's result.
+type IntentVoterResult struct {
+	VoterID    string     `json:"voter_id"`
+	Vote       IntentVote `json:"vote"`
+	Confidence float64    `json:"confidence"`
+	Reasons    []string   `json:"reasons"`
+	Latency    Duration   `json:"latency_ms"`
 }
 
-// AlignmentResult represents the aggregated alignment quorum result.
-type AlignmentResult struct {
-	Voters         []AlignmentVoter `json:"voters"`
-	AggregatedVote Vote             `json:"aggregated_vote"`
-	Latency        Duration         `json:"latency_ms"`
+// IntentAlignmentResult represents the aggregated intent alignment quorum result.
+type IntentAlignmentResult struct {
+	Voters   []IntentVoterResult `json:"voters"`
+	Decision IntentDecision      `json:"decision"`
+	Latency  Duration            `json:"latency_ms"`
+}
+
+// IntentContext contains the normalized context for intent evaluation.
+type IntentContext struct {
+	IntentSummary      string          `json:"intent_summary"`
+	ToolName           string          `json:"tool_name"`
+	ToolDescription    string          `json:"tool_description"`
+	Args               json.RawMessage `json:"args"`
+	Operation          string          `json:"operation,omitempty"`
+	ResourceScope      string          `json:"resource_scope,omitempty"`
+	SideEffectScope    string          `json:"side_effect_scope,omitempty"`
+	Bulk               bool            `json:"bulk,omitempty"`
+	RequiredFields     []string        `json:"required_fields,omitempty"`
 }
 
 // ThreatResult represents the threat sentinel result.
@@ -166,17 +198,17 @@ type PolicyResult struct {
 
 // FirewallDecisionResponse is the output of the firewall evaluation.
 type FirewallDecisionResponse struct {
-	RequestID   string           `json:"request_id"`
-	AuditID     string           `json:"audit_id"`
-	Decision    Decision         `json:"decision"`
-	BaseRisk    RiskLevel        `json:"base_risk"`
-	Reasons     []string         `json:"reasons"`
-	Policy      *PolicyResult    `json:"policy,omitempty"`
-	Alignment   *AlignmentResult `json:"alignment,omitempty"`
-	Threat      *ThreatResult    `json:"threat,omitempty"`
-	Arbiter     *ArbiterResult   `json:"arbiter,omitempty"`
-	Timing      *PipelineTiming  `json:"timing,omitempty"`
-	EvaluatedAt time.Time        `json:"evaluated_at"`
+	RequestID   string                 `json:"request_id"`
+	AuditID     string                 `json:"audit_id"`
+	Decision    Decision               `json:"decision"`
+	BaseRisk    RiskLevel              `json:"base_risk"`
+	Reasons     []string               `json:"reasons"`
+	Policy      *PolicyResult          `json:"policy,omitempty"`
+	Alignment   *IntentAlignmentResult `json:"alignment,omitempty"`
+	Threat      *ThreatResult          `json:"threat,omitempty"`
+	Arbiter     *ArbiterResult         `json:"arbiter,omitempty"`
+	Timing      *PipelineTiming        `json:"timing,omitempty"`
+	EvaluatedAt time.Time              `json:"evaluated_at"`
 }
 
 // PipelineTiming tracks latency for each pipeline step.
@@ -259,24 +291,24 @@ type PolicyRule struct {
 
 // AuditRecord represents a complete audit trail entry.
 type AuditRecord struct {
-	AuditID      string                    `json:"audit_id"`
-	RequestID    string                    `json:"request_id"`
-	OrgID        string                    `json:"org_id"`
-	Actor        Actor                     `json:"actor"`
-	Environment  Environment               `json:"env"`
-	ToolCall     ToolCall                  `json:"tool_call"`
-	UserIntent   string                    `json:"user_intent"`
-	Decision     Decision                  `json:"decision"`
-	BaseRisk     RiskLevel                 `json:"base_risk"`
-	Reasons      []string                  `json:"reasons"`
-	Policy       *PolicyResult             `json:"policy,omitempty"`
-	Alignment    *AlignmentResult          `json:"alignment,omitempty"`
-	Threat       *ThreatResult             `json:"threat,omitempty"`
-	Arbiter      *ArbiterResult            `json:"arbiter,omitempty"`
-	Timing       *PipelineTiming           `json:"timing,omitempty"`
-	PipelineStep string                    `json:"pipeline_step"` // Where decision was made
-	CreatedAt    time.Time                 `json:"created_at"`
-	Metadata     map[string]any            `json:"metadata,omitempty"`
+	AuditID      string                 `json:"audit_id"`
+	RequestID    string                 `json:"request_id"`
+	OrgID        string                 `json:"org_id"`
+	Actor        Actor                  `json:"actor"`
+	Environment  Environment            `json:"env"`
+	ToolCall     ToolCall               `json:"tool_call"`
+	UserIntent   string                 `json:"user_intent"`
+	Decision     Decision               `json:"decision"`
+	BaseRisk     RiskLevel              `json:"base_risk"`
+	Reasons      []string               `json:"reasons"`
+	Policy       *PolicyResult          `json:"policy,omitempty"`
+	Alignment    *IntentAlignmentResult `json:"alignment,omitempty"`
+	Threat       *ThreatResult          `json:"threat,omitempty"`
+	Arbiter      *ArbiterResult         `json:"arbiter,omitempty"`
+	Timing       *PipelineTiming        `json:"timing,omitempty"`
+	PipelineStep string                 `json:"pipeline_step"` // Where decision was made
+	CreatedAt    time.Time              `json:"created_at"`
+	Metadata     map[string]any         `json:"metadata,omitempty"`
 }
 
 // ErrorResponse represents an API error response.
