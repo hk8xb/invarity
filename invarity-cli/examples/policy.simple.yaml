@@ -1,0 +1,68 @@
+apiVersion: invarity.dev/v1
+kind: Policy
+metadata:
+  name: simple-financial-policy
+  version: 1.0.0
+  description: A simple policy for controlling financial tool access
+  labels:
+    environment: sandbox
+    team: payments
+
+spec:
+  # Selectors determine which tools this policy applies to
+  selectors:
+    - category: financial
+
+  # Rules define the policy logic
+  rules:
+    # Allow small refunds automatically
+    - name: allow-small-refunds
+      description: Automatically approve refunds under $100
+      condition: |
+        tool.name == "stripe.refund_payment" &&
+        parameters.amount <= 10000
+      action: allow
+
+    # Escalate medium refunds
+    - name: escalate-medium-refunds
+      description: Require review for refunds between $100-$500
+      condition: |
+        tool.name == "stripe.refund_payment" &&
+        parameters.amount > 10000 &&
+        parameters.amount <= 50000
+      action: escalate
+      metadata:
+        reason: "Medium-value refund requires approval"
+        approvers:
+          - support-lead
+
+    # Block large refunds
+    - name: block-large-refunds
+      description: Block refunds over $500 without manager approval
+      condition: |
+        tool.name == "stripe.refund_payment" &&
+        parameters.amount > 50000
+      action: deny
+      metadata:
+        reason: "Large refunds require manager approval via separate workflow"
+
+    # Rate limit all financial operations
+    - name: financial-rate-limit
+      description: Limit financial operations per user
+      condition: |
+        tool.category == "financial"
+      action: allow
+      constraints:
+        rateLimit:
+          maxCalls: 50
+          windowSeconds: 3600
+          scope: user
+
+  # Default action if no rules match
+  defaultAction: allow
+
+  # Audit settings
+  audit:
+    enabled: true
+    includeParameters: true
+    redactSensitive: true

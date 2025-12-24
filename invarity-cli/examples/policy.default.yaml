@@ -1,0 +1,59 @@
+apiVersion: invarity.dev/v1
+kind: Policy
+metadata:
+  name: default-financial-policy
+  version: 1.0.0
+  description: Default policy for financial tool operations
+
+spec:
+  # Selectors determine which tools this policy applies to
+  selectors:
+    - category: financial
+    - labels:
+        domain: payments
+
+  # Rules define the policy logic
+  rules:
+    # Block all operations above $10,000 without approval
+    - name: high-value-block
+      description: Require approval for high-value transactions
+      condition: |
+        tool.category == "financial" &&
+        parameters.amount > 1000000
+      action: escalate
+      metadata:
+        approval_required: true
+        approvers:
+          - finance-manager
+          - compliance
+
+    # Rate limit refunds
+    - name: refund-rate-limit
+      description: Limit refund frequency
+      condition: |
+        tool.name == "stripe.refund_payment"
+      action: allow
+      constraints:
+        rateLimit:
+          maxCalls: 10
+          windowSeconds: 3600
+          scope: user
+
+    # Block suspicious patterns
+    - name: fraud-detection
+      description: Block operations flagged as potentially fraudulent
+      condition: |
+        threat.score > 0.8 ||
+        threat.label == "malicious"
+      action: deny
+      metadata:
+        reason: "Blocked due to fraud detection"
+
+  # Default action if no rules match
+  defaultAction: allow
+
+  # Audit settings
+  audit:
+    enabled: true
+    includeParameters: true
+    redactSensitive: true

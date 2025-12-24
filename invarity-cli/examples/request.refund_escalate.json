@@ -1,0 +1,32 @@
+{
+  "tool_name": "stripe.refund_payment",
+  "tool_version": "1.0.0",
+  "parameters": {
+    "payment_id": "pi_3abc123xyz",
+    "amount": 15000,
+    "currency": "USD",
+    "reason": "customer_request",
+    "metadata": {
+      "ticket_id": "SUPPORT-12345",
+      "agent_id": "agent-007",
+      "escalation_level": 2
+    }
+  },
+  "context": {
+    "session_id": "sess_abc123",
+    "user_id": "user_456",
+    "conversation_id": "conv_789",
+    "agent": {
+      "name": "CustomerSupportAgent",
+      "version": "2.1.0",
+      "provider": "acme-corp"
+    },
+    "environment": "production",
+    "timestamp": "2024-01-15T14:30:00Z"
+  },
+  "request_metadata": {
+    "idempotency_key": "idem_key_xyz789",
+    "client_ip": "192.168.1.100",
+    "user_agent": "AcmeAgent/2.1.0"
+  }
+}

@@ -1,0 +1,129 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://invarity.ai/schemas/invarity.tools.schema.json",
+  "title": "Invarity Tool Definition (Conventional Tool + invarity block, v1)",
+  "type": "object",
+  "additionalProperties": true,
+  "required": ["name", "description", "invarity"],
+  "properties": {
+    "name": {
+      "type": "string",
+      "description": "Provider-facing tool name (OpenAI/Claude/LangChain). Recommended: snake_case, <=64 chars.",
+      "minLength": 1,
+      "maxLength": 64,
+      "pattern": "^[a-zA-Z0-9_\\-\\.]{1,64}$"
+    },
+    "description": {
+      "type": "string",
+      "minLength": 1,
+      "maxLength": 2000
+    },
+
+    "parameters": {
+      "type": "object",
+      "description": "OpenAI-style tool args schema (JSON Schema). Must be strict object schema.",
+      "required": ["type", "additionalProperties"],
+      "properties": {
+        "type": { "const": "object" },
+        "additionalProperties": { "const": false }
+      }
+    },
+    "input_schema": {
+      "type": "object",
+      "description": "Claude-style tool input schema (JSON Schema). Must be strict object schema.",
+      "required": ["type", "additionalProperties"],
+      "properties": {
+        "type": { "const": "object" },
+        "additionalProperties": { "const": false }
+      }
+    },
+
+    "invarity": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["id", "version", "risk"],
+      "properties": {
+        "id": {
+          "type": "string",
+          "description": "Unique tool identifier",
+          "minLength": 3,
+          "maxLength": 128
+        },
+        "version": {
+          "type": "string",
+          "description": "Immutable semantic version for this tool definition.",
+          "pattern": "^(0|[1-9]\\d*)\\.(0|[1-9]\\d*)\\.(0|[1-9]\\d*)(?:-[0-9A-Za-z-.]+)?(?:\\+[0-9A-Za-z-.]+)?$"
+        },
+        "schema_hash": {
+          "type": "string",
+          "description": "Optional; server/CLI can compute. Format: sha256:<hex>.",
+          "pattern": "^sha256:[a-f0-9]{64}$"
+        },
+
+        "risk": {
+          "type": "object",
+          "additionalProperties": false,
+          "description": "Minimal deterministic risk metadata for the Firewall. Only operation, side_effect_scope and resource_scope are required; others are optional but strongly recommended.",
+          "required": ["operation", "side_effect_scope", "resource_scope"],
+          "properties": {
+            "operation": {
+              "type": "string",
+              "enum": ["read", "write", "delete", "execute"]
+            },
+            "base_risk": {
+              "type": "string",
+              "enum": ["low", "medium", "high", "critical"]
+            },
+            "data_class": {
+              "type": "string",
+              "enum": ["public", "internal", "confidential", "pii", "phi", "financial"]
+            },
+            "money_movement": { "type": "boolean" },
+            "reversibility": {
+              "type": "string",
+              "enum": ["reversible", "partially_reversible", "irreversible"]
+            },
+            "side_effect_scope": {
+              "type": "string",
+              "enum": ["none", "internal", "external", "global"]
+            },
+            "resource_scope": {
+              "type": "string",
+              "enum": ["single", "scoped_collection", "global"]
+            },
+            "privilege_change": { "type": "boolean" },
+
+            "bulk": { "type": "boolean" },
+            "max_bulk": {
+              "oneOf": [
+                { "type": "null" },
+                { "type": "integer", "minimum": 2, "maximum": 1000000 }
+              ]
+            },
+            "requires_human_review": { "type": "boolean" }
+          },
+          "allOf": [
+            {
+              "if": { "properties": { "bulk": { "const": false } }, "required": ["bulk"] },
+              "then": { "properties": { "max_bulk": { "type": "null" } } }
+            },
+            {
+              "if": { "properties": { "bulk": { "const": true } }, "required": ["bulk"] },
+              "then": { "properties": { "max_bulk": { "type": "integer", "minimum": 2 } } }
+            }
+          ]
+        }
+      }
+    }
+  },
+
+  "allOf": [
+    {
+      "description": "Require exactly one of parameters or input_schema.",
+      "oneOf": [
+        { "required": ["parameters"], "not": { "required": ["input_schema"] } },
+        { "required": ["input_schema"], "not": { "required": ["parameters"] } }
+      ]
+    }
+  ]
+}

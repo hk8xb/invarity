@@ -1,0 +1,107 @@
+# This policy intentionally contains fuzzy/ambiguous terms
+# to demonstrate the fuzziness report functionality.
+#
+# When compiled, the server will identify:
+# - Unresolved terms that need mapping
+# - Required variables that need values
+# - Suggested mappings based on context
+
+apiVersion: invarity.dev/v1
+kind: Policy
+metadata:
+  name: fuzzy-approval-policy
+  version: 0.1.0
+  description: Policy with intentionally fuzzy terms for demonstration
+  labels:
+    status: draft
+    demo: fuzziness
+
+spec:
+  selectors:
+    - category: financial
+    - labels:
+        domain: payments
+
+  rules:
+    # Rule with fuzzy term: "high-value"
+    # The server doesn't know what "high-value" means without context
+    - name: high-value-transactions
+      description: Escalate high-value transactions
+      condition: |
+        transaction.is_high_value == true
+      action: escalate
+      metadata:
+        fuzzy_term: "high-value"
+        note: "Server will flag 'is_high_value' as unresolved"
+
+    # Rule with undefined variable reference
+    # $MAX_AUTO_APPROVE_AMOUNT is not defined anywhere
+    - name: auto-approve-threshold
+      description: Auto-approve under configurable threshold
+      condition: |
+        parameters.amount <= $MAX_AUTO_APPROVE_AMOUNT
+      action: allow
+      metadata:
+        variable: "MAX_AUTO_APPROVE_AMOUNT"
+        note: "This variable needs to be defined"
+
+    # Rule with vague condition
+    # "suspicious" is subjective and needs mapping
+    - name: block-suspicious
+      description: Block suspicious activity
+      condition: |
+        user.behavior == "suspicious" ||
+        request.risk_indicator == "anomalous"
+      action: deny
+      metadata:
+        fuzzy_terms:
+          - suspicious
+          - anomalous
+        note: "These terms need concrete definitions"
+
+    # Rule referencing external context
+    # "trusted_customer" needs definition
+    - name: trusted-customer-bypass
+      description: Allow trusted customers higher limits
+      condition: |
+        customer.is_trusted == true &&
+        parameters.amount <= $TRUSTED_CUSTOMER_LIMIT
+      action: allow
+      metadata:
+        requires:
+          - definition of "trusted customer"
+          - TRUSTED_CUSTOMER_LIMIT value
+
+    # Rule with time-based condition using undefined window
+    - name: after-hours-review
+      description: Review transactions outside business hours
+      condition: |
+        request.timestamp.hour < $BUSINESS_HOURS_START ||
+        request.timestamp.hour > $BUSINESS_HOURS_END
+      action: escalate
+      metadata:
+        variables:
+          - BUSINESS_HOURS_START
+          - BUSINESS_HOURS_END
+
+  # Variables section - partially defined
+  # This shows what the policy expects but some values are missing
+  variables:
+    # Defined variable
+    REFUND_COOLDOWN_HOURS: 24
+
+    # These are referenced but need values:
+    # MAX_AUTO_APPROVE_AMOUNT: ???
+    # TRUSTED_CUSTOMER_LIMIT: ???
+    # BUSINESS_HOURS_START: ???
+    # BUSINESS_HOURS_END: ???
+
+  # Default action
+  defaultAction: escalate
+
+  # When fuzzy, escalate to human review
+  fuzziness:
+    behavior: escalate
+    notify:
+      - policy-admin@example.com
+    message: "Request requires review due to policy ambiguity"

@@ -1,0 +1,49 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://invarity.ai/schemas/invarity.toolset.schema.json",
+  "title": "Invarity Toolset Definition (v1)",
+  "type": "object",
+  "additionalProperties": true,
+  "required": ["toolset_id", "tools"],
+  "properties": {
+    "toolset_id": { "type": "string", "minLength": 1, "maxLength": 128 },
+    "description": { "type": "string", "maxLength": 2000 },
+    "envs": {
+      "type": "array",
+      "items": { "type": "string", "enum": ["sandbox", "prod"] },
+      "minItems": 1,
+      "maxItems": 2,
+      "uniqueItems": true
+    },
+    "status": { "type": "string", "enum": ["DRAFT", "ACTIVE", "DEPRECATED"] },
+    "tools": {
+      "type": "array",
+      "minItems": 1,
+      "maxItems": 5000,
+      "items": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": ["id", "version"],
+        "properties": {
+          "id": { "type": "string", "minLength": 1, "maxLength": 256 },
+          "version": {
+            "type": "string",
+            "pattern": "^(0|[1-9]\\d*)\\.(0|[1-9]\\d*)\\.(0|[1-9]\\d*)(?:-[0-9A-Za-z-.]+)?(?:\\+[0-9A-Za-z-.]+)?$"
+          }
+        }
+      }
+    },
+    "policy": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "bundle_id": { "type": "string", "minLength": 1, "maxLength": 256 },
+        "version": { "type": "string", "maxLength": 128 }
+      }
+    },
+    "labels": {
+      "type": "object",
+      "additionalProperties": { "type": "string", "maxLength": 128 }
+    }
+  }
+}

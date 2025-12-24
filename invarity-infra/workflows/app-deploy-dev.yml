@@ -1,0 +1,104 @@
+name: App Deploy (Dev)
+
+on:
+  push:
+    branches:
+      - main
+    paths:
+      - 'app/**'
+      - 'Dockerfile'
+      - '.github/workflows/app-deploy-dev.yml'
+  workflow_dispatch:
+    inputs:
+      image_tag:
+        description: 'Docker image tag (defaults to git SHA)'
+        required: false
+        type: string
+
+permissions:
+  id-token: write
+  contents: read
+
+env:
+  AWS_REGION: us-east-1
+  INVARITY_ENV: dev
+
+jobs:
+  build-and-deploy:
+    name: Build and Deploy
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Configure AWS credentials
+        uses: aws-actions/configure-aws-credentials@v4
+        with:
+          role-to-assume: ${{ secrets.AWS_ROLE_ARN }}
+          role-session-name: invarity-app-deploy
+          aws-region: ${{ env.AWS_REGION }}
+
+      - name: Get ECR Repository URI from SSM
+        id: ssm-ecr
+        run: |
+          ECR_REPO_URI=$(aws ssm get-parameter --name "/invarity/${{ env.INVARITY_ENV }}/ecr/repo_uri" --query "Parameter.Value" --output text)
+          echo "ecr_repo_uri=$ECR_REPO_URI" >> $GITHUB_OUTPUT
+
+          # Extract registry from URI
+          ECR_REGISTRY=$(echo $ECR_REPO_URI | cut -d'/' -f1)
+          echo "ecr_registry=$ECR_REGISTRY" >> $GITHUB_OUTPUT
+
+      - name: Get ECS Cluster and Service from SSM
+        id: ssm-ecs
+        run: |
+          CLUSTER_NAME=$(aws ssm get-parameter --name "/invarity/${{ env.INVARITY_ENV }}/ecs/cluster_name" --query "Parameter.Value" --output text)
+          SERVICE_NAME=$(aws ssm get-parameter --name "/invarity/${{ env.INVARITY_ENV }}/ecs/service_name" --query "Parameter.Value" --output text)
+          echo "cluster_name=$CLUSTER_NAME" >> $GITHUB_OUTPUT
+          echo "service_name=$SERVICE_NAME" >> $GITHUB_OUTPUT
+
+      - name: Login to Amazon ECR
+        uses: aws-actions/amazon-ecr-login@v2
+
+      - name: Set image tag
+        id: image-tag
+        run: |
+          if [ -n "${{ github.event.inputs.image_tag }}" ]; then
+            echo "tag=${{ github.event.inputs.image_tag }}" >> $GITHUB_OUTPUT
+          else
+            echo "tag=${{ github.sha }}" >> $GITHUB_OUTPUT
+          fi
+
+      - name: Build Docker image
+        run: |
+          docker build -t ${{ steps.ssm-ecr.outputs.ecr_repo_uri }}:${{ steps.image-tag.outputs.tag }} .
+          docker tag ${{ steps.ssm-ecr.outputs.ecr_repo_uri }}:${{ steps.image-tag.outputs.tag }} ${{ steps.ssm-ecr.outputs.ecr_repo_uri }}:latest
+
+      - name: Push Docker image
+        run: |
+          docker push ${{ steps.ssm-ecr.outputs.ecr_repo_uri }}:${{ steps.image-tag.outputs.tag }}
+          docker push ${{ steps.ssm-ecr.outputs.ecr_repo_uri }}:latest
+
+      - name: Update ECS Service
+        run: |
+          aws ecs update-service \
+            --cluster ${{ steps.ssm-ecs.outputs.cluster_name }} \
+            --service ${{ steps.ssm-ecs.outputs.service_name }} \
+            --force-new-deployment
+
+      - name: Wait for deployment
+        run: |
+          echo "Waiting for ECS service to stabilize..."
+          aws ecs wait services-stable \
+            --cluster ${{ steps.ssm-ecs.outputs.cluster_name }} \
+            --services ${{ steps.ssm-ecs.outputs.service_name }}
+          echo "Deployment complete!"
+
+      - name: Get ALB URL
+        run: |
+          ALB_URL=$(aws ssm get-parameter --name "/invarity/${{ env.INVARITY_ENV }}/alb_url" --query "Parameter.Value" --output text)
+          echo "=== Deployment Summary ==="
+          echo "Image: ${{ steps.ssm-ecr.outputs.ecr_repo_uri }}:${{ steps.image-tag.outputs.tag }}"
+          echo "Service: ${{ steps.ssm-ecs.outputs.service_name }}"
+          echo "ALB URL: $ALB_URL"
+          echo "Health Check: ${ALB_URL}/healthz"

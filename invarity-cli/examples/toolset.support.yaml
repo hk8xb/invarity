@@ -1,0 +1,26 @@
+# Toolset definition for Customer Support agents
+
+toolset_id: support-agent-v1
+description: Tools available to customer support AI agents for handling tickets.
+
+envs:
+  - sandbox
+
+status: DRAFT
+
+tools:
+  - id: stripe.refund_payment
+    version: 1.0.0
+  - id: database.query
+    version: 1.0.0
+  - id: email.send_template
+    version: 1.1.0
+  - id: ticket.update_status
+    version: 2.0.0
+  - id: ticket.add_note
+    version: 1.0.0
+
+labels:
+  team: support
+  use_case: customer-service
+  tier: basic

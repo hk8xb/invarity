@@ -1,0 +1,38 @@
+# Toolset definition for the Payments team
+# Groups related tools together with environment and policy bindings
+
+toolset_id: payments-v1
+description: |
+  Payment processing toolset including refunds, charges, and subscription management.
+  Used by customer support and billing automation agents.
+
+# Environments where this toolset is available
+envs:
+  - sandbox
+  - prod
+
+# Toolset status
+status: ACTIVE
+
+# Tools included in this toolset (references by id@version)
+tools:
+  - id: stripe.refund_payment
+    version: 1.0.0
+  - id: stripe.create_charge
+    version: 2.1.0
+  - id: stripe.update_subscription
+    version: 1.2.0
+  - id: internal.log_action
+    version: 1.0.0
+
+# Optional: Link to policy bundle
+policy:
+  bundle_id: payments-policy-bundle
+  version: 2.0.0
+
+# Custom labels for organization
+labels:
+  team: payments
+  domain: billing
+  compliance: pci-dss
+  owner: payments-team@example.com

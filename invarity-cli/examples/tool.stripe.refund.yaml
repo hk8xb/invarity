@@ -1,0 +1,59 @@
+# Tool definition following the new Invarity Tool Schema v1
+# This format is compatible with OpenAI/Claude tool definitions
+# with the addition of the invarity block for firewall metadata.
+
+name: stripe_refund_payment
+description: |
+  Process a refund for a Stripe payment. Supports partial and full refunds
+  with optional reason and metadata.
+
+# OpenAI-style parameters (use input_schema for Claude-style)
+parameters:
+  type: object
+  additionalProperties: false
+  properties:
+    payment_id:
+      type: string
+      description: The Stripe payment intent ID to refund
+      pattern: "^pi_[a-zA-Z0-9]+$"
+    amount:
+      type: integer
+      description: Amount to refund in cents (if omitted, full refund)
+      minimum: 1
+      maximum: 10000000
+    currency:
+      type: string
+      description: Three-letter ISO currency code
+      enum:
+        - USD
+        - EUR
+        - GBP
+        - CAD
+        - AUD
+    reason:
+      type: string
+      description: Reason for the refund
+      enum:
+        - duplicate
+        - fraudulent
+        - customer_request
+        - other
+  required:
+    - payment_id
+
+# Invarity-specific metadata for the firewall
+invarity:
+  id: stripe.refund_payment
+  version: 1.0.0
+  risk:
+    operation: write
+    base_risk: high
+    data_class: financial
+    money_movement: true
+    reversibility: partially_reversible
+    side_effect_scope: external
+    resource_scope: single
+    privilege_change: false
+    bulk: false
+    max_bulk: null
+    requires_human_review: true

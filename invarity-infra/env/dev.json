@@ -1,0 +1,27 @@
+{
+  "envName": "dev",
+  "project": "invarity",
+  "tags": {
+    "Project": "invarity",
+    "Env": "dev",
+    "ManagedBy": "cdk"
+  },
+  "vpc": {
+    "maxAzs": 2,
+    "natGateways": 1
+  },
+  "ecs": {
+    "cpu": 256,
+    "memoryMiB": 512,
+    "desiredCount": 1,
+    "healthCheckPath": "/healthz",
+    "containerPort": 8080
+  },
+  "logs": {
+    "retentionDays": 14
+  },
+  "s3": {
+    "manifestsPrefix": "manifests",
+    "auditPrefix": "audit"
+  }
+}

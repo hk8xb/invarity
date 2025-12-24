@@ -1,0 +1,53 @@
+# Tool definition for database query operations
+# Uses Claude-style input_schema instead of OpenAI parameters
+
+name: db_query
+description: Execute a read-only SQL query against the analytics database.
+
+# Claude-style input schema
+input_schema:
+  type: object
+  additionalProperties: false
+  properties:
+    query:
+      type: string
+      description: SQL SELECT query to execute
+      maxLength: 10000
+    database:
+      type: string
+      description: Target database name
+      enum:
+        - analytics
+        - reporting
+        - logs
+    limit:
+      type: integer
+      description: Maximum rows to return
+      minimum: 1
+      maximum: 10000
+      default: 100
+    timeout_seconds:
+      type: integer
+      description: Query timeout in seconds
+      minimum: 1
+      maximum: 300
+      default: 30
+  required:
+    - query
+    - database
+
+invarity:
+  id: database.query
+  version: 1.0.0
+  risk:
+    operation: read
+    base_risk: low
+    data_class: internal
+    money_movement: false
+    reversibility: reversible
+    side_effect_scope: none
+    resource_scope: scoped_collection
+    privilege_change: false
+    bulk: true
+    max_bulk: 10000
+    requires_human_review: false
