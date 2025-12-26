@@ -11,6 +11,7 @@ import * as secretsmanager from 'aws-cdk-lib/aws-secretsmanager';
 import * as ssm from 'aws-cdk-lib/aws-ssm';
 import * as iam from 'aws-cdk-lib/aws-iam';
 import { Construct } from 'constructs';
+import { IdentityConstruct } from './identity';
 
 export interface FirewallStackProps extends cdk.StackProps {
   envName: string;
@@ -34,6 +35,13 @@ export interface FirewallStackProps extends cdk.StackProps {
     s3: {
       manifestsPrefix: string;
       auditPrefix: string;
+    };
+    identity?: {
+      cognito: {
+        callbackUrls: string[];
+        logoutUrls: string[];
+        domainPrefix?: string;
+      };
     };
   };
 }
@@ -245,6 +253,31 @@ export class FirewallStack extends cdk.Stack {
     });
 
     // ========================================
+    // Identity Construct (Cognito + User/Membership/Token tables)
+    // ========================================
+    // Determine removal policy based on environment
+    const identityRemovalPolicy = envName === 'dev'
+      ? cdk.RemovalPolicy.DESTROY
+      : cdk.RemovalPolicy.RETAIN;
+
+    // Default cognito config for backwards compatibility
+    const defaultCognitoConfig = {
+      callbackUrls: ['http://localhost:3000/callback'],
+      logoutUrls: ['http://localhost:3000'],
+      domainPrefix: `invarity-${envName}`,
+    };
+
+    const identityConfig = envConfig.identity?.cognito || defaultCognitoConfig;
+
+    const identity = new IdentityConstruct(this, 'Identity', {
+      envName,
+      prefix,
+      kmsKey,
+      removalPolicy: identityRemovalPolicy,
+      cognito: identityConfig,
+    });
+
+    // ========================================
     // S3 Buckets (Versioned, encrypted)
     // ========================================
 
@@ -302,6 +335,11 @@ export class FirewallStack extends cdk.Stack {
     kmsKey.grantEncryptDecrypt(taskRole);
     apiKeysSaltSecret.grantRead(taskRole);
 
+    // Grant permissions to identity tables
+    identity.usersTable.grantReadWriteData(taskRole);
+    identity.tenantMembershipsTable.grantReadWriteData(taskRole);
+    identity.tokensTable.grantReadWriteData(taskRole);
+
     const taskDefinition = new ecs.FargateTaskDefinition(this, 'TaskDef', {
       family: `${prefix}-firewall`,
       cpu: envConfig.ecs.cpu,
@@ -331,6 +369,14 @@ export class FirewallStack extends cdk.Stack {
         // S3 prefix conventions for app to use
         MANIFESTS_PREFIX: envConfig.s3.manifestsPrefix,
         AUDIT_PREFIX: envConfig.s3.auditPrefix,
+        // Identity tables
+        USERS_TABLE: identity.usersTable.tableName,
+        TENANT_MEMBERSHIPS_TABLE: identity.tenantMembershipsTable.tableName,
+        TOKENS_TABLE: identity.tokensTable.tableName,
+        // Cognito
+        COGNITO_USER_POOL_ID: identity.userPool.userPoolId,
+        COGNITO_USER_POOL_CLIENT_ID: identity.userPoolClient.userPoolClientId,
+        COGNITO_ISSUER_URL: identity.getIssuerUrl(),
       },
       healthCheck: {
         command: ['CMD-SHELL', `curl -f http://localhost:${envConfig.ecs.containerPort}/healthz || exit 1`],
@@ -559,6 +605,59 @@ export class FirewallStack extends cdk.Stack {
       value: apiKeysSaltSecret.secretArn,
       description: 'API Keys Salt Secret ARN',
       exportName: `${prefix}-api-keys-salt-secret-arn`,
+    });
+
+    // ========================================
+    // Identity Outputs
+    // ========================================
+    new cdk.CfnOutput(this, 'CognitoUserPoolId', {
+      value: identity.userPool.userPoolId,
+      description: 'Cognito User Pool ID',
+      exportName: `${prefix}-cognito-user-pool-id`,
+    });
+
+    new cdk.CfnOutput(this, 'CognitoUserPoolArn', {
+      value: identity.userPool.userPoolArn,
+      description: 'Cognito User Pool ARN',
+      exportName: `${prefix}-cognito-user-pool-arn`,
+    });
+
+    new cdk.CfnOutput(this, 'CognitoUserPoolClientId', {
+      value: identity.userPoolClient.userPoolClientId,
+      description: 'Cognito User Pool Client ID (Web App)',
+      exportName: `${prefix}-cognito-user-pool-client-id`,
+    });
+
+    new cdk.CfnOutput(this, 'CognitoIssuerUrl', {
+      value: identity.getIssuerUrl(),
+      description: 'Cognito OIDC Issuer URL',
+      exportName: `${prefix}-cognito-issuer-url`,
+    });
+
+    if (identity.userPoolDomain) {
+      new cdk.CfnOutput(this, 'CognitoHostedUiDomain', {
+        value: `${identityConfig.domainPrefix}.auth.${this.region}.amazoncognito.com`,
+        description: 'Cognito Hosted UI Domain',
+        exportName: `${prefix}-cognito-hosted-ui-domain`,
+      });
+    }
+
+    new cdk.CfnOutput(this, 'UsersTableName', {
+      value: identity.usersTable.tableName,
+      description: 'Users DynamoDB Table',
+      exportName: `${prefix}-users-table`,
+    });
+
+    new cdk.CfnOutput(this, 'TenantMembershipsTableName', {
+      value: identity.tenantMembershipsTable.tableName,
+      description: 'Tenant Memberships DynamoDB Table',
+      exportName: `${prefix}-tenant-memberships-table`,
+    });
+
+    new cdk.CfnOutput(this, 'TokensTableName', {
+      value: identity.tokensTable.tableName,
+      description: 'Tokens DynamoDB Table',
+      exportName: `${prefix}-tokens-table`,
     });
   }
 }

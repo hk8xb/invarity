@@ -10,7 +10,8 @@ This stack provisions:
 - **Load Balancing**: Public ALB on HTTP :80
 - **Compute**: ECS Fargate cluster and service
 - **Container Registry**: ECR repository for firewall service image
-- **Data Storage**: 6 DynamoDB tables with multi-tenant keying, 2 S3 buckets
+- **Data Storage**: 9 DynamoDB tables with multi-tenant keying, 2 S3 buckets
+- **Identity**: Cognito User Pool for human authentication, identity DynamoDB tables
 - **Security**: KMS key for encryption, Secrets Manager for API key salt
 - **Configuration**: SSM Parameter Store for service discovery
 
@@ -20,14 +21,59 @@ All data storage is designed for tenant isolation:
 
 ### DynamoDB Tables
 
-| Table | Partition Key | Sort Key | Purpose |
-|-------|--------------|----------|---------|
-| `tenants` | `tenant_id` | - | Tenant configuration, includes `default_kms_key_arn` for future per-tenant encryption |
-| `principals` | `tenant_id` | `principal_id` | API principals (users/services) per tenant |
-| `tools` | `tenant_id#principal_id` | `tool_key` (`<tool_id>#<version>`) | Tool definitions |
-| `toolsets` | `tenant_id#principal_id` | `toolset_id` | Toolset configurations |
-| `toolset-revisions` | `tenant_id#principal_id` | `<toolset_id>#<revision>` | Toolset version history |
-| `audit-index` | `tenant_id` | `created_at#audit_id` | Audit log index (GSI for per-principal queries) |
+#### Firewall Tables
+
+| Table | Partition Key | Sort Key | GSIs | Purpose |
+|-------|--------------|----------|------|---------|
+| `tenants` | `tenant_id` | - | - | Tenant configuration, includes `default_kms_key_arn` for future per-tenant encryption |
+| `principals` | `tenant_id` | `principal_id` | - | API principals (agents/services) per tenant |
+| `tools` | `tenant_id#principal_id` | `tool_key` (`<tool_id>#<version>`) | - | Tool definitions |
+| `toolsets` | `tenant_id#principal_id` | `toolset_id` | - | Toolset configurations |
+| `toolset-revisions` | `tenant_id#principal_id` | `<toolset_id>#<revision>` | - | Toolset version history |
+| `audit-index` | `tenant_id` | `created_at#audit_id` | `principal-index` | Audit log index |
+
+#### Identity Tables
+
+| Table | Partition Key | Sort Key | GSIs | Purpose |
+|-------|--------------|----------|------|---------|
+| `users` | `user_id` (Cognito sub) | - | `email-index` (email → user_id) | Thin mirror of Cognito users |
+| `tenant-memberships` | `tenant_id` | `user_id` | `user-tenants-index` (user_id → tenant_id) | User to tenant role mappings |
+| `tokens` | `token_id` | - | `key-hash-index`, `tenant-tokens-index` | Developer and agent runtime tokens |
+
+##### Users Table Schema
+
+| Attribute | Type | Description |
+|-----------|------|-------------|
+| `user_id` | String (PK) | Cognito `sub` claim |
+| `email` | String | User email address |
+| `created_at` | String (ISO8601) | Creation timestamp |
+| `last_seen_at` | String (ISO8601) | Last activity timestamp |
+
+##### Tenant Memberships Table Schema
+
+| Attribute | Type | Description |
+|-----------|------|-------------|
+| `tenant_id` | String (PK) | Tenant identifier |
+| `user_id` | String (SK) | Cognito `sub` claim |
+| `role` | String | `owner` \| `admin` \| `developer` \| `viewer` |
+| `status` | String | `active` \| `invited` \| `disabled` |
+| `created_at` | String (ISO8601) | Membership creation timestamp |
+
+##### Tokens Table Schema
+
+| Attribute | Type | Description |
+|-----------|------|-------------|
+| `token_id` | String (PK) | Unique token identifier |
+| `token_type` | String | `developer` \| `agent` |
+| `tenant_id` | String | Associated tenant |
+| `principal_id` | String (optional) | Associated principal for agent tokens |
+| `key_hash` | String | SHA-256 hash of the token secret (NEVER store plaintext) |
+| `scopes` | List | Permission scopes |
+| `principal_allowlist` | List | Allowed principals (for developer tokens) |
+| `created_at` | String (ISO8601) | Creation timestamp |
+| `created_by_user_id` | String | User who created the token |
+| `revoked_at` | String (ISO8601, optional) | Revocation timestamp |
+| `last_used_at` | String (ISO8601, optional) | Last usage timestamp |
 
 ### S3 Bucket Prefixing Conventions
 
@@ -42,6 +88,60 @@ The `tenants` table includes a `default_kms_key_arn` field (optional). This supp
 - Per-tenant KMS keys (not implemented in MVP)
 - Per-tenant S3 buckets (not implemented in MVP)
 - No redesign required when enabling per-tenant encryption
+
+## Cognito Identity
+
+The stack provisions a Cognito User Pool for human user authentication (UI onboarding, later SSO).
+
+### Configuration
+
+Cognito settings are configured in `env/<env>.json`:
+
+```json
+{
+  "identity": {
+    "cognito": {
+      "callbackUrls": ["http://localhost:3000/callback"],
+      "logoutUrls": ["http://localhost:3000"],
+      "domainPrefix": "invarity-dev"
+    }
+  }
+}
+```
+
+### Features
+
+- **Email sign-in**: Users authenticate with email address
+- **Email verification**: Required for new accounts
+- **Password policy**: 8+ chars, upper/lower/digit required
+- **OAuth flows**: Authorization Code + PKCE (recommended for SPAs)
+- **Hosted UI**: Available at `https://<domainPrefix>.auth.<region>.amazoncognito.com`
+- **MFA**: Optional TOTP (can be enabled per-user)
+
+### Integration
+
+Your web application should use the Cognito Hosted UI or AWS Amplify SDK:
+
+```typescript
+// Example: Get Cognito config from SSM
+const userPoolId = await ssm.getParameter('/invarity/dev/cognito/user_pool_id');
+const clientId = await ssm.getParameter('/invarity/dev/cognito/user_pool_client_id');
+const issuerUrl = await ssm.getParameter('/invarity/dev/cognito/issuer_url');
+
+// Example: Validate JWT tokens
+const jwksUrl = `${issuerUrl}/.well-known/jwks.json`;
+```
+
+### OAuth Endpoints
+
+When using the hosted UI domain (`domainPrefix`):
+
+| Endpoint | URL |
+|----------|-----|
+| Authorize | `https://<domain>.auth.<region>.amazoncognito.com/oauth2/authorize` |
+| Token | `https://<domain>.auth.<region>.amazoncognito.com/oauth2/token` |
+| UserInfo | `https://<domain>.auth.<region>.amazoncognito.com/oauth2/userInfo` |
+| Logout | `https://<domain>.auth.<region>.amazoncognito.com/logout` |
 
 ## Prerequisites
 
@@ -105,10 +205,16 @@ The ECS task definition injects these environment variables into your container:
 | `TOOLSETS_TABLE` | DynamoDB toolsets table name |
 | `TOOLSET_REVISIONS_TABLE` | DynamoDB toolset revisions table name |
 | `AUDIT_INDEX_TABLE` | DynamoDB audit index table name |
+| `USERS_TABLE` | DynamoDB users table name |
+| `TENANT_MEMBERSHIPS_TABLE` | DynamoDB tenant memberships table name |
+| `TOKENS_TABLE` | DynamoDB tokens table name |
 | `MANIFESTS_BUCKET` | S3 manifests bucket name |
 | `AUDIT_BLOBS_BUCKET` | S3 audit blobs bucket name |
 | `KMS_KEY_ARN` | KMS key ARN for encryption |
 | `API_KEYS_SALT_SECRET_ARN` | Secrets Manager ARN for API key salt |
+| `COGNITO_USER_POOL_ID` | Cognito User Pool ID |
+| `COGNITO_USER_POOL_CLIENT_ID` | Cognito User Pool Client ID |
+| `COGNITO_ISSUER_URL` | Cognito OIDC Issuer URL |
 | `LOG_LEVEL` | Logging level (default: info) |
 | `MANIFESTS_PREFIX` | S3 prefix for manifests (`manifests`) |
 | `AUDIT_PREFIX` | S3 prefix for audits (`audit`) |
@@ -118,22 +224,41 @@ The ECS task definition injects these environment variables into your container:
 All configuration is stored in SSM Parameter Store under `/invarity/<env>/`:
 
 ```
+# Core infrastructure
 /invarity/dev/alb_url
 /invarity/dev/ecr/repo_uri
 /invarity/dev/ecs/cluster_name
 /invarity/dev/ecs/service_name
+
+# Firewall DynamoDB tables
 /invarity/dev/dynamodb/tenants_table
 /invarity/dev/dynamodb/principals_table
 /invarity/dev/dynamodb/tools_table
 /invarity/dev/dynamodb/toolsets_table
 /invarity/dev/dynamodb/toolset_revisions_table
 /invarity/dev/dynamodb/audit_index_table
+
+# Identity DynamoDB tables
+/invarity/dev/dynamodb/users_table
+/invarity/dev/dynamodb/tenant_memberships_table
+/invarity/dev/dynamodb/tokens_table
+
+# S3 buckets
 /invarity/dev/s3/manifests_bucket
 /invarity/dev/s3/audit_blobs_bucket
 /invarity/dev/s3/manifests_prefix
 /invarity/dev/s3/audit_prefix
+
+# Security
 /invarity/dev/kms/key_arn
 /invarity/dev/secrets/api_keys_salt_arn
+
+# Cognito
+/invarity/dev/cognito/user_pool_id
+/invarity/dev/cognito/user_pool_arn
+/invarity/dev/cognito/user_pool_client_id
+/invarity/dev/cognito/issuer_url
+/invarity/dev/cognito/hosted_ui_domain  # If domainPrefix is configured
 ```
 
 ## GitHub Actions Setup
@@ -224,7 +349,8 @@ invarity-infra/
 ├── bin/
 │   └── invarity.ts          # CDK app entry point
 ├── lib/
-│   └── firewall-stack.ts    # Main infrastructure stack
+│   ├── firewall-stack.ts    # Main infrastructure stack
+│   └── identity.ts          # Identity construct (Cognito + DynamoDB)
 ├── env/
 │   └── dev.json             # Dev environment configuration
 ├── scripts/
@@ -270,6 +396,13 @@ invarity-infra/
   "s3": {
     "manifestsPrefix": "manifests",
     "auditPrefix": "audit"
+  },
+  "identity": {
+    "cognito": {
+      "callbackUrls": ["https://app.invarity.com/callback"],
+      "logoutUrls": ["https://app.invarity.com"],
+      "domainPrefix": "invarity-prod"
+    }
   }
 }
 ```
@@ -308,6 +441,7 @@ Estimated monthly costs for dev environment:
 | S3 | Pay per storage/request |
 | KMS | ~$1/month per key |
 | CloudWatch Logs | Pay per ingestion/storage |
+| Cognito | Free tier: 50k MAU, then $0.0055/MAU |
 
 **Total estimate**: ~$60-100/month for dev with minimal traffic.
 

@@ -18,6 +18,18 @@ type Config struct {
 	S3Bucket  string
 	AWSRegion string
 
+	// Cognito settings
+	CognitoIssuer   string // e.g., https://cognito-idp.us-east-1.amazonaws.com/us-east-1_xxxxx
+	CognitoAudience string // Cognito app client ID
+	CognitoEnabled  bool   // Whether to enable Cognito JWT verification
+
+	// DynamoDB table names
+	DDBTableTenants     string
+	DDBTableUsers       string
+	DDBTableMemberships string
+	DDBTablePrincipals  string
+	DDBTableTokens      string
+
 	// LLM endpoints
 	FunctionGemmaBaseURL string
 	FunctionGemmaAPIKey  string
@@ -32,15 +44,16 @@ type Config struct {
 	IntentModelTimeout  time.Duration
 
 	// Request limits
-	RequestMaxBytes  int
-	MaxContextChars  int
-	MaxIntentChars   int
+	RequestMaxBytes int
+	MaxContextChars int
+	MaxIntentChars  int
 
 	// Cache settings
 	CacheTTL time.Duration
 
 	// Feature flags
 	EnableThreatSentinel bool
+	EnableControlPlane   bool // Whether to enable control plane endpoints (onboarding, etc.)
 }
 
 // DefaultConfig returns a configuration with sensible defaults.
@@ -50,6 +63,14 @@ func DefaultConfig() *Config {
 		LogLevel:             "info",
 		S3Bucket:             "",
 		AWSRegion:            "us-east-1",
+		CognitoIssuer:        "",
+		CognitoAudience:      "",
+		CognitoEnabled:       false,
+		DDBTableTenants:      "invarity-tenants",
+		DDBTableUsers:        "invarity-users",
+		DDBTableMemberships:  "invarity-memberships",
+		DDBTablePrincipals:   "invarity-principals",
+		DDBTableTokens:       "invarity-tokens",
 		FunctionGemmaBaseURL: "http://localhost:8001/v1",
 		FunctionGemmaAPIKey:  "",
 		LlamaGuardBaseURL:    "http://localhost:8002/v1",
@@ -64,6 +85,7 @@ func DefaultConfig() *Config {
 		MaxIntentChars:       4000,
 		CacheTTL:             5 * time.Minute,
 		EnableThreatSentinel: true,
+		EnableControlPlane:   false,
 	}
 }
 
@@ -165,6 +187,51 @@ func LoadFromEnv() (*Config, error) {
 
 	if v := os.Getenv("ENABLE_THREAT_SENTINEL"); v != "" {
 		cfg.EnableThreatSentinel = v == "true" || v == "1"
+	}
+
+	// Cognito settings
+	if v := os.Getenv("INVARITY_COGNITO_ISSUER"); v != "" {
+		cfg.CognitoIssuer = v
+		cfg.CognitoEnabled = true // Auto-enable when issuer is set
+	}
+
+	if v := os.Getenv("INVARITY_COGNITO_AUDIENCE"); v != "" {
+		cfg.CognitoAudience = v
+	}
+
+	if v := os.Getenv("INVARITY_COGNITO_ENABLED"); v != "" {
+		cfg.CognitoEnabled = v == "true" || v == "1"
+	}
+
+	// Override AWS region if INVARITY-specific var is set
+	if v := os.Getenv("INVARITY_AWS_REGION"); v != "" {
+		cfg.AWSRegion = v
+	}
+
+	// DynamoDB table names
+	if v := os.Getenv("INVARITY_DDB_TABLE_TENANTS"); v != "" {
+		cfg.DDBTableTenants = v
+	}
+
+	if v := os.Getenv("INVARITY_DDB_TABLE_USERS"); v != "" {
+		cfg.DDBTableUsers = v
+	}
+
+	if v := os.Getenv("INVARITY_DDB_TABLE_MEMBERSHIPS"); v != "" {
+		cfg.DDBTableMemberships = v
+	}
+
+	if v := os.Getenv("INVARITY_DDB_TABLE_PRINCIPALS"); v != "" {
+		cfg.DDBTablePrincipals = v
+	}
+
+	if v := os.Getenv("INVARITY_DDB_TABLE_TOKENS"); v != "" {
+		cfg.DDBTableTokens = v
+	}
+
+	// Control plane feature flag
+	if v := os.Getenv("INVARITY_ENABLE_CONTROL_PLANE"); v != "" {
+		cfg.EnableControlPlane = v == "true" || v == "1"
 	}
 
 	return cfg, cfg.Validate()

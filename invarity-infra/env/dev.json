@@ -23,5 +23,12 @@
   "s3": {
     "manifestsPrefix": "manifests",
     "auditPrefix": "audit"
+  },
+  "identity": {
+    "cognito": {
+      "callbackUrls": ["http://localhost:3000/callback", "http://localhost:3000/auth/callback"],
+      "logoutUrls": ["http://localhost:3000", "http://localhost:3000/logout"],
+      "domainPrefix": "invarity-dev"
+    }
   }
 }
