@@ -736,3 +736,112 @@ func marshalCanonical(v interface{}) ([]byte, error) {
 		return json.Marshal(val)
 	}
 }
+
+// ConstraintLintResult contains the result of constraint linting.
+type ConstraintLintResult struct {
+	Valid  bool     `json:"valid"`
+	Errors []string `json:"errors,omitempty"`
+}
+
+// LintToolConstraints performs deterministic lint checks on tool constraints.
+// Checks:
+//   - if amount_limit != null then amount_limit.arg_key must exist in tool parameters/input_schema properties
+//   - if limits block exists, validate description length against max_description_chars
+//   - if limits block exists, validate constraints.notes length against max_constraints_notes_chars
+func LintToolConstraints(tool map[string]interface{}) *ConstraintLintResult {
+	result := &ConstraintLintResult{Valid: true}
+
+	// Extract invarity block
+	invarity, ok := tool["invarity"].(map[string]interface{})
+	if !ok {
+		result.Errors = append(result.Errors, "missing invarity block")
+		result.Valid = false
+		return result
+	}
+
+	// Extract constraints block
+	constraints, ok := invarity["constraints"].(map[string]interface{})
+	if !ok {
+		result.Errors = append(result.Errors, "missing invarity.constraints block")
+		result.Valid = false
+		return result
+	}
+
+	// Get parameter properties from tool schema (OpenAI or Claude style)
+	paramProps := getParameterProperties(tool)
+
+	// Check 1: if amount_limit != null then amount_limit.arg_key must exist in tool parameters
+	if amountLimit, ok := constraints["amount_limit"].(map[string]interface{}); ok && amountLimit != nil {
+		argKey, _ := amountLimit["arg_key"].(string)
+		if argKey != "" && paramProps != nil {
+			if _, exists := paramProps[argKey]; !exists {
+				result.Errors = append(result.Errors,
+					fmt.Sprintf("amount_limit.arg_key '%s' does not exist in tool parameters", argKey))
+				result.Valid = false
+			}
+		}
+	}
+
+	// Check 2: if limits block exists, validate sizes
+	if limits, ok := invarity["limits"].(map[string]interface{}); ok && limits != nil {
+		// Check description length
+		if maxDescChars := getIntValue(limits, "max_description_chars"); maxDescChars > 0 {
+			if desc, ok := tool["description"].(string); ok {
+				if len(desc) > maxDescChars {
+					result.Errors = append(result.Errors,
+						fmt.Sprintf("description length (%d) exceeds limits.max_description_chars (%d)", len(desc), maxDescChars))
+					result.Valid = false
+				}
+			}
+		}
+
+		// Check constraints.notes length
+		if maxNotesChars := getIntValue(limits, "max_constraints_notes_chars"); maxNotesChars > 0 {
+			if notes, ok := constraints["notes"].(string); ok {
+				if len(notes) > maxNotesChars {
+					result.Errors = append(result.Errors,
+						fmt.Sprintf("constraints.notes length (%d) exceeds limits.max_constraints_notes_chars (%d)", len(notes), maxNotesChars))
+					result.Valid = false
+				}
+			}
+		}
+	}
+
+	return result
+}
+
+// getParameterProperties extracts the parameter properties from the tool schema.
+// Supports both OpenAI style (parameters.properties) and Claude style (input_schema.properties).
+func getParameterProperties(tool map[string]interface{}) map[string]interface{} {
+	// Try OpenAI style: parameters.properties
+	if params, ok := tool["parameters"].(map[string]interface{}); ok {
+		if props, ok := params["properties"].(map[string]interface{}); ok {
+			return props
+		}
+	}
+
+	// Try Claude style: input_schema.properties
+	if inputSchema, ok := tool["input_schema"].(map[string]interface{}); ok {
+		if props, ok := inputSchema["properties"].(map[string]interface{}); ok {
+			return props
+		}
+	}
+
+	return nil
+}
+
+// getIntValue safely extracts an integer value from a map.
+func getIntValue(m map[string]interface{}, key string) int {
+	if v, ok := m[key]; ok {
+		switch val := v.(type) {
+		case int:
+			return val
+		case int64:
+			return int(val)
+		case float64:
+			return int(val)
+		}
+	}
+	return 0
+}
+

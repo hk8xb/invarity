@@ -329,215 +329,9 @@ invarity version --json
 
 ---
 
-## Policy Management
+## Tool Manifest Schema (v3)
 
-The Invarity CLI provides a complete policy lifecycle workflow:
-
-```
-validate → diff → apply → status → fuzziness → promote
-```
-
-### Policy Lifecycle Overview
-
-1. **validate** - Check policy syntax locally (no server required)
-2. **diff** - Compare local policy against active policy on server
-3. **apply** - Upload policy for compilation
-4. **status** - Check compilation progress
-5. **fuzziness** - Review unresolved terms and required variables
-6. **promote** - Activate the compiled policy
-
-### Policy Command Flags
-
-All policy commands support these additional flags:
-
-| Flag | Description |
-|------|-------------|
-| `--org` | Organization ID (overrides config) |
-| `--env` | Environment: sandbox, staging, prod |
-| `--project` | Project ID (optional) |
-
-### `invarity policy validate`
-
-Validate a policy file locally without contacting the server.
-
-```bash
-# Validate a policy
-invarity policy validate -f policy.yaml
-
-# JSON output with validation report
-invarity policy validate -f policy.yaml --json
-```
-
-**Output includes:**
-- Syntax validation
-- Required field checks (apiVersion, kind, metadata, spec)
-- Rule structure validation
-- Warnings for potential issues
-- Canonical preview of the policy
-
-### `invarity policy diff`
-
-Compare a local policy with the currently active policy on the server.
-
-```bash
-# Basic diff
-invarity policy diff -f policy.yaml
-
-# Diff against specific org/env
-invarity policy diff -f policy.yaml --org my-org --env prod
-
-# JSON output
-invarity policy diff -f policy.yaml --json
-```
-
-If the server doesn't support fetching active policies yet, the command shows a canonical rendering of the local policy instead.
-
-### `invarity policy apply`
-
-Upload a policy to the server for compilation.
-
-```bash
-# Apply a policy
-invarity policy apply -f policy.yaml --org my-org
-
-# Apply and wait for compilation
-invarity policy apply -f policy.yaml --wait
-
-# Apply to production
-invarity policy apply -f policy.yaml --org my-org --env prod
-
-# JSON output
-invarity policy apply -f policy.yaml --json
-```
-
-**Response includes:**
-- `policy_version` - Unique version ID for this policy
-- `status` - COMPILING, READY, or FAILED
-- `fuzziness_report` - If the policy has unresolved terms
-
-**With `--wait`:**
-- Polls server with exponential backoff
-- Shows progress indicator
-- Returns when compilation completes or fails
-- Maximum wait time: 5 minutes
-
-### `invarity policy status`
-
-Check the compilation status of a policy version.
-
-```bash
-# Check status
-invarity policy status pol_abc123
-
-# JSON output
-invarity policy status pol_abc123 --json
-```
-
-**Status values:**
-- `PENDING` - Queued for compilation
-- `COMPILING` - Currently being processed
-- `READY` - Successfully compiled, ready for activation
-- `FAILED` - Compilation failed (check errors)
-
-### `invarity policy fuzziness`
-
-View the fuzziness report for a policy version.
-
-```bash
-# View fuzziness report
-invarity policy fuzziness pol_abc123
-
-# JSON output
-invarity policy fuzziness pol_abc123 --json
-```
-
-**Report includes:**
-- **Unresolved Terms** - Terms that couldn't be mapped to known concepts
-- **Required Variables** - Variables referenced but not defined
-- **Suggested Mappings** - Potential resolutions with confidence scores
-- **Fuzziness Score** - Overall ambiguity level (0-1)
-- **What This Means** - Explanation of runtime behavior
-
-**When fuzziness exists:**
-Requests matching fuzzy conditions may **ESCALATE** to human review until terms are resolved or variables are provided.
-
-### `invarity policy promote`
-
-Activate a compiled policy version.
-
-```bash
-# Promote to active
-invarity policy promote pol_abc123 --active
-
-# JSON output
-invarity policy promote pol_abc123 --active --json
-```
-
-Only policies with `READY` status can be promoted. Once promoted, the policy becomes active for the org/environment.
-
----
-
-### Policy Workflow Examples
-
-#### Complete Deployment Workflow
-
-```bash
-# 1. Validate locally
-invarity policy validate -f policy.yaml
-
-# 2. Check diff against current active policy
-invarity policy diff -f policy.yaml --org my-org --env prod
-
-# 3. Apply and wait for compilation
-invarity policy apply -f policy.yaml --org my-org --env prod --wait
-
-# 4. Review fuzziness (if any)
-invarity policy fuzziness pol_abc123
-
-# 5. Promote to active
-invarity policy promote pol_abc123 --active
-```
-
-#### CI/CD Integration
-
-```bash
-#!/bin/bash
-set -e
-
-# Validate all policies
-for f in policies/*.yaml; do
-  invarity policy validate -f "$f"
-done
-
-# Apply to staging
-RESULT=$(invarity policy apply -f policies/main.yaml \
-  --org "$ORG_ID" --env staging --wait --json)
-
-VERSION=$(echo "$RESULT" | jq -r '.policy_version')
-STATUS=$(echo "$RESULT" | jq -r '.status')
-
-if [ "$STATUS" != "READY" ]; then
-  echo "Policy compilation failed"
-  exit 1
-fi
-
-# Check fuzziness score
-FUZZ=$(invarity policy fuzziness "$VERSION" --json | jq -r '.fuzziness_score // 0')
-if (( $(echo "$FUZZ > 0.5" | bc -l) )); then
-  echo "Warning: High fuzziness score ($FUZZ)"
-  # Optionally fail or require manual review
-fi
-
-# Promote if ready
-invarity policy promote "$VERSION" --active
-echo "Policy $VERSION activated"
-```
-
----
-
-## Tool Manifest Schema
-
-Tool manifests follow the conventional tool format (compatible with OpenAI/Claude) with an additional `invarity` block for firewall metadata. See [examples/tool.stripe.refund.yaml](examples/tool.stripe.refund.yaml) for a complete example.
+Tool manifests follow the conventional tool format (compatible with OpenAI/Claude) with an additional `invarity` block for firewall metadata. The schema uses a **deterministic constraints model** - all constraints must be explicitly defined, no inference.
 
 ### Required Fields
 
@@ -550,25 +344,45 @@ parameters:
   type: object
   additionalProperties: false
   properties:
-    # parameter definitions
+    amount:
+      type: number
+    recipient_id:
+      type: string
   required:
-    - required_param
+    - amount
+    - recipient_id
 
 # Invarity-specific metadata
 invarity:
-  id: my.tool.id           # Unique identifier (3-128 chars)
+  id: my.tool.id           # Opaque tool identifier (1-256 chars)
   version: 1.0.0           # Semantic version
   # schema_hash is computed automatically if not provided
   # schema_hash: sha256:<hex>
+
+  # Risk metadata (all fields required)
   risk:
-    operation: write       # read, write, delete, execute
-    side_effect_scope: external  # none, internal, external, global
-    resource_scope: single       # single, scoped_collection, global
-    # Optional but recommended:
-    base_risk: high        # low, medium, high, critical
-    data_class: financial  # public, internal, confidential, pii, phi, financial
-    money_movement: true
-    reversibility: partially_reversible  # reversible, partially_reversible, irreversible
+    base_risk: high              # low, medium, high, critical
+    operation: write             # read, write, delete, execute
+    requires_human_review: false
+    tags: ["financial", "pii"]   # Optional customer labels
+    notes: "Handles payment refunds"  # Optional notes
+
+  # Constraints (all fields required - no inference)
+  constraints:
+    requires_justification: true
+    required_args: ["amount", "recipient_id"]
+    disallow_wildcards: true
+    max_bulk: null               # null or integer (1-1000000)
+    amount_limit:                # null or object
+      max: 10000
+      currency: USD
+      arg_key: amount            # Must exist in parameters/input_schema properties
+    notes: "Max refund $100"     # Optional notes (max 512 chars)
+
+  # Optional: Hard size limits for LLM context budgets
+  limits:
+    max_description_chars: 800
+    max_constraints_notes_chars: 256
 ```
 
 ### Schema Hash Computation
@@ -583,20 +397,45 @@ The canonical form has sorted keys and no extra whitespace.
 
 ### Risk Metadata
 
-The `invarity.risk` block provides deterministic risk metadata for the firewall:
+The `invarity.risk` block provides deterministic risk metadata for the firewall.
 
-| Field | Required | Values |
-|-------|----------|--------|
-| `operation` | Yes | `read`, `write`, `delete`, `execute` |
-| `side_effect_scope` | Yes | `none`, `internal`, `external`, `global` |
-| `resource_scope` | Yes | `single`, `scoped_collection`, `global` |
-| `base_risk` | No | `low`, `medium`, `high`, `critical` |
-| `data_class` | No | `public`, `internal`, `confidential`, `pii`, `phi`, `financial` |
-| `money_movement` | No | `true`, `false` |
-| `reversibility` | No | `reversible`, `partially_reversible`, `irreversible` |
-| `bulk` | No | `true`, `false` |
-| `max_bulk` | No | `2` - `1000000` (only if bulk=true) |
-| `requires_human_review` | No | `true`, `false` |
+| Field | Required | Values | Description |
+|-------|----------|--------|-------------|
+| `base_risk` | Yes | `low`, `medium`, `high`, `critical` | Base risk level of the tool |
+| `operation` | Yes | `read`, `write`, `delete`, `execute` | Type of operation the tool performs |
+| `requires_human_review` | Yes | `true`, `false` | Whether this tool always requires human review |
+| `tags` | No | string[] | Customer labels for routing/reporting (max 32 items) |
+| `notes` | No | string | Optional notes (max 2000 chars) |
+
+### Constraints
+
+The `invarity.constraints` block defines deterministic constraints for tool execution. **Required fields must be present - no inference.**
+
+| Field | Required | Type | Description |
+|-------|----------|------|-------------|
+| `requires_justification` | Yes | boolean | Whether a justification string is required |
+| `required_args` | Yes | string[] | Argument keys that must be provided (max 32 items) |
+| `disallow_wildcards` | Yes | boolean | Reject wildcard patterns like `*`, `ALL`, empty filters |
+| `max_bulk` | Yes | integer/null | Maximum bulk size (1-1000000), or null if not applicable |
+| `amount_limit` | Yes | object/null | Money movement limit, or null if not applicable |
+| `notes` | No | string | Optional notes for humans (max 512 chars) |
+
+### Limits (Optional)
+
+The `invarity.limits` block defines hard size limits to protect LLM context budgets.
+
+| Field | Required | Type | Description |
+|-------|----------|------|-------------|
+| `max_description_chars` | Yes (if limits present) | integer | Max description length (100-2000, default 800) |
+| `max_constraints_notes_chars` | Yes (if limits present) | integer | Max constraints.notes length (0-512, default 256) |
+
+### Constraint Lint Checks
+
+The CLI performs additional lint checks beyond schema validation:
+
+1. **Amount limit arg**: If `amount_limit` is set, `amount_limit.arg_key` must exist in tool parameters
+2. **Description length**: If `limits` is set, description length must not exceed `max_description_chars`
+3. **Notes length**: If `limits` is set, `constraints.notes` length must not exceed `max_constraints_notes_chars`
 
 ## Toolset Schema
 
@@ -619,41 +458,10 @@ envs:                        # Environments where toolset is available
   - prod
 status: ACTIVE               # DRAFT, ACTIVE, DEPRECATED
 description: What this toolset is for
-policy:
-  bundle_id: policy-bundle-id
-  version: 1.0.0
 labels:
   team: payments
   owner: team@example.com
 ```
-
-## Policy Schema
-
-Policies define rules for controlling tool execution. See [examples/policy.simple.yaml](examples/policy.simple.yaml) for a complete example.
-
-### Required Fields
-
-```yaml
-apiVersion: invarity.dev/v1
-kind: Policy
-metadata:
-  name: my-policy
-  version: 1.0.0
-spec:
-  rules:
-    - name: rule-name
-      condition: |
-        tool.category == "financial"
-      action: allow  # allow, deny, escalate, review
-  defaultAction: allow
-```
-
-### Policy Actions
-
-- `allow` - Permit the tool call
-- `deny` - Block the tool call
-- `escalate` - Require human approval
-- `review` - Flag for review but allow
 
 ## Examples
 
@@ -721,16 +529,12 @@ invarity-cli/
 │   │   ├── simulate.go
 │   │   ├── tools.go
 │   │   ├── toolsets.go
-│   │   ├── policy.go
 │   │   ├── audit.go
 │   │   └── version.go
 │   ├── client/            # HTTP client
 │   │   └── client.go
 │   ├── config/            # Configuration loading
 │   │   └── config.go
-│   ├── policy/            # Policy validation & rendering
-│   │   ├── validate.go
-│   │   └── canonical.go
 │   ├── poller/            # Async polling utilities
 │   │   └── poller.go
 │   └── validate/          # JSON Schema validation
@@ -746,10 +550,7 @@ invarity-cli/
 │   ├── tool.stripe.refund.yaml
 │   ├── tool.database.query.yaml
 │   ├── toolset.payments.yaml
-│   ├── toolset.support.yaml
-│   ├── policy.default.yaml
-│   ├── policy.simple.yaml
-│   └── policy.fuzzy.yaml
+│   └── toolset.support.yaml
 ├── go.mod
 ├── go.sum
 ├── Makefile

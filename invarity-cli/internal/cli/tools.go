@@ -146,6 +146,24 @@ func runToolsValidate(cmd *cobra.Command, args []string) error {
 		os.Exit(ExitValidationError)
 	}
 
+	// Run constraint lint checks if schema validation passed
+	var lintResult *validate.ConstraintLintResult
+	if result.Valid {
+		tool, err := validate.ParseToolFile(toolsValidateFile)
+		if err == nil {
+			lintResult = validate.LintToolConstraints(tool)
+			if !lintResult.Valid {
+				result.Valid = false
+				for _, e := range lintResult.Errors {
+					result.Errors = append(result.Errors, &validate.ValidationError{
+						Path:    "invarity.constraints",
+						Message: e,
+					})
+				}
+			}
+		}
+	}
+
 	// JSON output
 	if cfgJSON {
 		jsonOut, _ := json.MarshalIndent(result, "", "  ")
@@ -256,6 +274,16 @@ func runToolsRegister(cmd *cobra.Command, args []string) error {
 		os.Exit(ExitValidationError)
 	}
 
+	// Run constraint lint checks
+	lintResult := validate.LintToolConstraints(tool)
+	if !lintResult.Valid {
+		printError("Tool constraint validation failed - cannot register")
+		for _, e := range lintResult.Errors {
+			fmt.Fprintf(os.Stderr, "  • invarity.constraints: %s\n", e)
+		}
+		os.Exit(ExitValidationError)
+	}
+
 	// Normalize enums to lowercase and compute schema_hash if missing
 	tool = validate.NormalizeToolEnums(tool)
 	tool, err = validate.EnsureSchemaHash(tool)
@@ -354,6 +382,23 @@ func runToolsValidateDir(cmd *cobra.Command, args []string) error {
 				"error": err.Error(),
 			})
 			continue
+		}
+
+		// Run constraint lint checks if schema validation passed
+		if vr.Valid {
+			tool, err := validate.ParseToolFile(file)
+			if err == nil {
+				lintResult := validate.LintToolConstraints(tool)
+				if !lintResult.Valid {
+					vr.Valid = false
+					for _, e := range lintResult.Errors {
+						vr.Errors = append(vr.Errors, &validate.ValidationError{
+							Path:    "invarity.constraints",
+							Message: e,
+						})
+					}
+				}
+			}
 		}
 
 		if vr.Valid {
@@ -467,7 +512,7 @@ func runToolsRegisterDir(cmd *cobra.Command, args []string) error {
 		os.Exit(ExitNetworkError)
 	}
 
-	// First, validate all files
+	// First, validate all files (schema + constraint lint checks)
 	validFiles := make([]string, 0, len(files))
 	invalidFiles := make([]string, 0)
 	var invalidDetails []map[string]interface{}
@@ -480,7 +525,27 @@ func runToolsRegisterDir(cmd *cobra.Command, args []string) error {
 				"file":  file,
 				"error": err.Error(),
 			})
-		} else if !vr.Valid {
+			continue
+		}
+
+		// Run constraint lint checks if schema validation passed
+		if vr.Valid {
+			tool, err := validate.ParseToolFile(file)
+			if err == nil {
+				lintResult := validate.LintToolConstraints(tool)
+				if !lintResult.Valid {
+					vr.Valid = false
+					for _, e := range lintResult.Errors {
+						vr.Errors = append(vr.Errors, &validate.ValidationError{
+							Path:    "invarity.constraints",
+							Message: e,
+						})
+					}
+				}
+			}
+		}
+
+		if !vr.Valid {
 			invalidFiles = append(invalidFiles, file)
 			errors := make([]string, 0, len(vr.Errors))
 			for _, e := range vr.Errors {

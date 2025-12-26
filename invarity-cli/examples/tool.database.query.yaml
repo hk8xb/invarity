@@ -1,4 +1,4 @@
-# Tool definition for database query operations
+# Tool definition for database query operations (v3 schema)
 # Uses Claude-style input_schema instead of OpenAI parameters
 
 name: db_query
@@ -36,18 +36,29 @@ input_schema:
     - query
     - database
 
+# Invarity-specific metadata for the firewall (v3 schema)
 invarity:
   id: database.query
   version: 1.0.0
+
+  # Risk metadata (all required)
   risk:
-    operation: read
     base_risk: low
-    data_class: internal
-    money_movement: false
-    reversibility: reversible
-    side_effect_scope: none
-    resource_scope: scoped_collection
-    privilege_change: false
-    bulk: true
-    max_bulk: 10000
+    operation: read
     requires_human_review: false
+    tags:
+      - database
+      - analytics
+      - read-only
+    notes: "Read-only access to analytics databases"
+
+  # Constraints (all required - no inference)
+  constraints:
+    requires_justification: false
+    required_args:
+      - query
+      - database
+    disallow_wildcards: true
+    max_bulk: 10000
+    amount_limit: null
+    notes: "Max 10k rows per query. Wildcards disallowed to prevent SELECT *."

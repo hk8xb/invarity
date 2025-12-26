@@ -1,4 +1,4 @@
-# Tool definition following the new Invarity Tool Schema v1
+# Tool definition following the Invarity Tool Schema v3
 # This format is compatible with OpenAI/Claude tool definitions
 # with the addition of the invarity block for firewall metadata.
 
@@ -41,19 +41,31 @@ parameters:
   required:
     - payment_id
 
-# Invarity-specific metadata for the firewall
+# Invarity-specific metadata for the firewall (v3 schema)
 invarity:
   id: stripe.refund_payment
   version: 1.0.0
+
+  # Risk metadata (all required)
   risk:
-    operation: write
     base_risk: high
-    data_class: financial
-    money_movement: true
-    reversibility: partially_reversible
-    side_effect_scope: external
-    resource_scope: single
-    privilege_change: false
-    bulk: false
-    max_bulk: null
+    operation: write
     requires_human_review: true
+    tags:
+      - financial
+      - refunds
+      - stripe
+    notes: "High-risk financial operation - refunds money to customers"
+
+  # Constraints (all required - no inference)
+  constraints:
+    requires_justification: true
+    required_args:
+      - payment_id
+    disallow_wildcards: true
+    max_bulk: null
+    amount_limit:
+      max: 10000000
+      currency: USD
+      arg_key: amount
+    notes: "Max refund $100,000. Justification required for audit trail."

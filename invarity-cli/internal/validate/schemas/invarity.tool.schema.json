@@ -1,7 +1,7 @@
 {
   "$schema": "https://json-schema.org/draft/2020-12/schema",
-  "$id": "https://invarity.ai/schemas/invarity.tools.schema.json",
-  "title": "Invarity Tool Definition (Conventional Tool + invarity block, v1)",
+  "$id": "https://invarity.ai/schemas/invarity.tool.schema.v3.json",
+  "title": "Invarity Tool Definition (Conventional Tool + invarity block, v3 — required tool-level constraints)",
   "type": "object",
   "additionalProperties": true,
   "required": ["name", "description", "invarity"],
@@ -15,39 +15,42 @@
     },
     "description": {
       "type": "string",
+      "description": "Human description of what the tool does.",
       "minLength": 1,
       "maxLength": 2000
     },
 
     "parameters": {
       "type": "object",
-      "description": "OpenAI-style tool args schema (JSON Schema). Must be strict object schema.",
+      "description": "OpenAI-style tool args schema (JSON Schema). Must be a strict object schema.",
       "required": ["type", "additionalProperties"],
       "properties": {
         "type": { "const": "object" },
         "additionalProperties": { "const": false }
-      }
+      },
+      "additionalProperties": true
     },
     "input_schema": {
       "type": "object",
-      "description": "Claude-style tool input schema (JSON Schema). Must be strict object schema.",
+      "description": "Claude-style tool input schema (JSON Schema). Must be a strict object schema.",
       "required": ["type", "additionalProperties"],
       "properties": {
         "type": { "const": "object" },
         "additionalProperties": { "const": false }
-      }
+      },
+      "additionalProperties": true
     },
 
     "invarity": {
       "type": "object",
       "additionalProperties": false,
-      "required": ["id", "version", "risk"],
+      "required": ["id", "version", "risk", "constraints"],
       "properties": {
         "id": {
           "type": "string",
-          "description": "Unique tool identifier",
-          "minLength": 3,
-          "maxLength": 128
+          "description": "Opaque tool identifier (stable across versions). Flexible format.",
+          "minLength": 1,
+          "maxLength": 256
         },
         "version": {
           "type": "string",
@@ -56,62 +59,149 @@
         },
         "schema_hash": {
           "type": "string",
-          "description": "Optional; server/CLI can compute. Format: sha256:<hex>.",
+          "description": "Optional. Server/CLI can compute. Format: sha256:<hex>.",
           "pattern": "^sha256:[a-f0-9]{64}$"
         },
 
         "risk": {
           "type": "object",
           "additionalProperties": false,
-          "description": "Minimal deterministic risk metadata for the Firewall. Only operation, side_effect_scope and resource_scope are required; others are optional but strongly recommended.",
-          "required": ["operation", "side_effect_scope", "resource_scope"],
+          "description": "MVP: user-declared risk tier for routing safeguards.",
+          "required": ["base_risk", "operation", "requires_human_review"],
           "properties": {
-            "operation": {
-              "type": "string",
-              "enum": ["read", "write", "delete", "execute"]
-            },
             "base_risk": {
               "type": "string",
               "enum": ["low", "medium", "high", "critical"]
             },
-            "data_class": {
+            "operation": {
               "type": "string",
-              "enum": ["public", "internal", "confidential", "pii", "phi", "financial"]
+              "enum": ["read", "write", "delete", "execute"]
             },
-            "money_movement": { "type": "boolean" },
-            "reversibility": {
+            "requires_human_review": {
+              "type": "boolean",
+              "description": "If true, Invarity should ESCALATE (or require approval) even if intent aligns."
+            },
+            "tags": {
+              "type": "array",
+              "description": "Optional customer labels for routing/reporting (no inference implied).",
+              "items": {
+                "type": "string",
+                "minLength": 1,
+                "maxLength": 64,
+                "pattern": "^[a-z0-9_\\-\\.]{1,64}$"
+              },
+              "maxItems": 32,
+              "uniqueItems": true
+            },
+            "notes": {
               "type": "string",
-              "enum": ["reversible", "partially_reversible", "irreversible"]
-            },
-            "side_effect_scope": {
-              "type": "string",
-              "enum": ["none", "internal", "external", "global"]
-            },
-            "resource_scope": {
-              "type": "string",
-              "enum": ["single", "scoped_collection", "global"]
-            },
-            "privilege_change": { "type": "boolean" },
+              "maxLength": 2000
+            }
+          }
+        },
 
-            "bulk": { "type": "boolean" },
+        "constraints": {
+          "type": "object",
+          "additionalProperties": false,
+          "description": "Tool-level policy (required). MUST be small and mechanically enforceable. No prose policies.",
+          "required": [
+            "requires_justification",
+            "required_args",
+            "disallow_wildcards",
+            "max_bulk",
+            "amount_limit"
+          ],
+          "properties": {
+            "requires_justification": {
+              "type": "boolean",
+              "description": "If true, every invocation must include a non-empty justification string in the request envelope."
+            },
+
+            "required_args": {
+              "type": "array",
+              "description": "Args that MUST be present for invocation. Keep minimal; no nested paths in v3.",
+              "items": {
+                "type": "string",
+                "minLength": 1,
+                "maxLength": 64,
+                "pattern": "^[A-Za-z0-9_\\-\\.]{1,64}$"
+              },
+              "minItems": 0,
+              "maxItems": 32,
+              "uniqueItems": true
+            },
+
+            "disallow_wildcards": {
+              "type": "boolean",
+              "description": "If true, reject obvious wildcard/broadcast patterns in args (e.g. '*', 'ALL', empty filter objects)."
+            },
+
             "max_bulk": {
+              "description": "Maximum allowed bulk size (deterministic). Use null if not applicable.",
               "oneOf": [
                 { "type": "null" },
-                { "type": "integer", "minimum": 2, "maximum": 1000000 }
+                { "type": "integer", "minimum": 1, "maximum": 1000000 }
               ]
             },
-            "requires_human_review": { "type": "boolean" }
-          },
-          "allOf": [
-            {
-              "if": { "properties": { "bulk": { "const": false } }, "required": ["bulk"] },
-              "then": { "properties": { "max_bulk": { "type": "null" } } }
+
+            "amount_limit": {
+              "description": "Money movement limit (deterministic). Use null if not applicable. Unit is customer-defined (recommend cents) and documented by the tool.",
+              "oneOf": [
+                { "type": "null" },
+                {
+                  "type": "object",
+                  "additionalProperties": false,
+                  "required": ["max", "currency", "arg_key"],
+                  "properties": {
+                    "max": {
+                      "type": "number",
+                      "minimum": 0
+                    },
+                    "currency": {
+                      "type": "string",
+                      "description": "ISO currency code (or 'N/A' if the tool uses a unit like cents without currency context).",
+                      "minLength": 1,
+                      "maxLength": 16
+                    },
+                    "arg_key": {
+                      "type": "string",
+                      "description": "Name of the argument field that contains the amount. Top-level only in v3.",
+                      "minLength": 1,
+                      "maxLength": 64,
+                      "pattern": "^[A-Za-z0-9_\\-\\.]{1,64}$"
+                    }
+                  }
+                }
+              ]
             },
-            {
-              "if": { "properties": { "bulk": { "const": true } }, "required": ["bulk"] },
-              "then": { "properties": { "max_bulk": { "type": "integer", "minimum": 2 } } }
+
+            "notes": {
+              "type": "string",
+              "description": "Optional short notes for humans. Not used for enforcement.",
+              "maxLength": 512
             }
-          ]
+          }
+        },
+
+        "limits": {
+          "type": "object",
+          "additionalProperties": false,
+          "description": "Hard size limits to protect LLM context budgets. CLI/server should enforce and reject oversize manifests.",
+          "required": ["max_description_chars", "max_constraints_notes_chars"],
+          "properties": {
+            "max_description_chars": {
+              "type": "integer",
+              "minimum": 100,
+              "maximum": 2000,
+              "default": 800
+            },
+            "max_constraints_notes_chars": {
+              "type": "integer",
+              "minimum": 0,
+              "maximum": 512,
+              "default": 256
+            }
+          }
         }
       }
     }
