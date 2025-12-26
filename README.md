@@ -1,41 +1,62 @@
 # Invarity
 
-A security control plane for AI agent tool execution. Invarity intercepts tool calls from AI agents and runs them through a deterministic decision pipeline combining schema validation, policy evaluation, and LLM-based semantic checks.
+A security control plane for AI agent tool execution. Invarity intercepts tool calls from AI agents, validates them against registered tool schemas, evaluates organizational policies, and runs LLM-based semantic checks before allowing execution.
 
 ## Architecture
 
 ```
-┌─────────────────────────────────────────────────────────────────┐
-│                         AI Agent                                │
-│                            │                                    │
-│                            ▼                                    │
-│  ┌──────────────────────────────────────────────────────────┐  │
-│  │                   Invarity Firewall                       │  │
-│  │  ┌────────┐  ┌────────┐  ┌────────┐  ┌────────────────┐  │  │
-│  │  │ Schema │→ │  Risk  │→ │ Policy │→ │ LLM Alignment  │  │  │
-│  │  │ Valid. │  │ Compute│  │ Pass 1 │  │ Quorum (3x)    │  │  │
-│  │  └────────┘  └────────┘  └────────┘  └────────────────┘  │  │
-│  │       │                                      │            │  │
-│  │       ▼                                      ▼            │  │
-│  │  ┌────────────────┐  ┌────────────┐  ┌────────────────┐  │  │
-│  │  │ Threat Sentinel│→ │ Policy     │→ │ Final Decision │  │  │
-│  │  │ (Llama Guard)  │  │ Arbiter    │  │ (allow/deny/   │  │  │
-│  │  └────────────────┘  └────────────┘  │  escalate)     │  │  │
-│  │                                       └────────────────┘  │  │
-│  └──────────────────────────────────────────────────────────┘  │
-│                            │                                    │
-│                            ▼                                    │
-│                      Tool Execution                             │
-└─────────────────────────────────────────────────────────────────┘
+┌─────────────────────────────────────────────────────────────────────────────┐
+│                              AI Agent                                        │
+│                                  │                                           │
+│                                  ▼                                           │
+│  ┌───────────────────────────────────────────────────────────────────────┐  │
+│  │                        Invarity Firewall                               │  │
+│  │                                                                        │  │
+│  │   ┌──────────────┐    ┌──────────────┐    ┌──────────────┐            │  │
+│  │   │ S0: Canon &  │ -> │ S1: Schema   │ -> │ S2: Risk     │            │  │
+│  │   │ Bounds Check │    │ Validation   │    │ Compute      │            │  │
+│  │   └──────────────┘    └──────────────┘    └──────────────┘            │  │
+│  │          │                                       │                     │  │
+│  │          v                                       v                     │  │
+│  │   ┌──────────────┐    ┌──────────────┐    ┌──────────────┐            │  │
+│  │   │ S3: Policy   │ -> │ S4: Alignment│ -> │ S5: Threat   │            │  │
+│  │   │ Pass 1       │    │ Quorum (3x)  │    │ Sentinel     │            │  │
+│  │   └──────────────┘    └──────────────┘    └──────────────┘            │  │
+│  │                              │                   │                     │  │
+│  │                              v                   v                     │  │
+│  │   ┌──────────────┐    ┌──────────────┐    ┌──────────────┐            │  │
+│  │   │ S6: Policy   │ -> │ S7: Policy   │ -> │ S8: Aggregate│ -> Decision│  │
+│  │   │ Arbiter      │    │ Pass 2       │    │ Decision     │            │  │
+│  │   └──────────────┘    └──────────────┘    └──────────────┘            │  │
+│  │                                                                        │  │
+│  └───────────────────────────────────────────────────────────────────────┘  │
+│                                  │                                           │
+│                                  ▼                                           │
+│                       ALLOW / ESCALATE / DENY                                │
+│                                  │                                           │
+│                                  ▼                                           │
+│                           Tool Execution                                     │
+└─────────────────────────────────────────────────────────────────────────────┘
 ```
 
 ## Packages
 
 | Package | Description | Language |
 |---------|-------------|----------|
-| [invarity-cli](./invarity-cli) | CLI for managing tools, toolsets, and policies | Go |
-| [invarity-go](./invarity-go) | Firewall server with decision pipeline | Go |
-| [invarity-infra](./invarity-infra) | AWS CDK infrastructure | TypeScript |
+| [invarity-go](./invarity-go) | Firewall server with 8-step decision pipeline | Go |
+| [invarity-cli](./invarity-cli) | CLI for managing tools, toolsets, and principals | Go |
+| [invarity-infra](./invarity-infra) | AWS CDK infrastructure (multi-tenant SaaS) | TypeScript |
+
+## Concepts
+
+Invarity uses a clear ontology for managing AI agent permissions:
+
+- **Tenants**: Organizations using the platform
+- **Tools**: Individual tool definitions with schemas and risk metadata (registered to tenant library)
+- **Toolsets**: Bundles of tool references (registered to tenant library)
+- **Principals**: Agents or services that execute tools (toolsets are applied to principals)
+
+This separation allows tools to be defined once and reused across multiple toolsets and principals.
 
 ## Quick Start
 
@@ -43,38 +64,46 @@ A security control plane for AI agent tool execution. Invarity intercepts tool c
 
 - Go 1.22+
 - Node.js 18+ (for infrastructure)
-- Docker (optional, for containerized deployment)
+- Docker (optional)
 
-### Run the Firewall Server Locally
+### Run the Firewall Server
 
 ```bash
 cd invarity-go
 cp .env.example .env
-# Configure LLM endpoints in .env
 make run
 ```
 
-The server starts on `http://localhost:8080`.
+Server starts on `http://localhost:8080`.
 
 ### Install the CLI
 
 ```bash
 cd invarity-cli
-make install
+go install ./cmd/invarity
 invarity version
 ```
 
-### Evaluate a Tool Call
+### Register Tools and Evaluate
 
 ```bash
 # Health check
 invarity ping
 
-# Simulate a tool call
-invarity simulate \
-  --tool stripe.refund_payment \
-  --arguments '{"payment_id": "pi_123", "amount": 50.00}' \
-  --context "Customer requested refund for damaged item"
+# Register tools to tenant library
+invarity tools register-dir ./tools
+
+# Register a toolset
+invarity toolsets register -f toolset.yaml --tools-dir ./tools
+
+# Apply toolset to a principal (agent)
+invarity principals apply-toolset \
+  --principal my-agent \
+  --toolset payments-v1 \
+  --revision 1.0.0
+
+# Simulate a tool call evaluation
+invarity simulate -f request.json --explain
 ```
 
 ## Decision Pipeline
@@ -83,15 +112,36 @@ The firewall evaluates each tool call through an 8-step pipeline:
 
 | Step | Name | Type | Description |
 |------|------|------|-------------|
-| S0 | Canonicalization | Deterministic | Bounds checking, input normalization |
-| S1 | Schema Validation | Deterministic | JSON Schema validation against tool definition |
-| S2 | Risk Computation | Deterministic | Calculate risk score from tool metadata |
-| S3 | Policy Pass 1 | Deterministic | Evaluate deterministic policy rules |
-| S4 | Alignment Quorum | LLM | 3-voter quorum using FunctionGemma |
-| S5 | Threat Sentinel | LLM | Threat detection via Llama Guard 3 (conditional) |
-| S6 | Policy Arbiter | LLM | Semantic policy evaluation via Qwen (conditional) |
-| S7 | Policy Pass 2 | Deterministic | Final deterministic rule pass |
-| S8 | Aggregate | - | Combine all signals into final decision |
+| S0 | Canonicalize | Deterministic | Bounds-check, truncate strings, validate required fields |
+| S1 | Schema Validation | Deterministic | Verify tool exists, version matches, args conform to schema |
+| S2 | Risk Compute | Deterministic | Calculate risk from tool profile + arguments + constraints |
+| S3 | Policy Pass 1 | Deterministic | Evaluate policy rules without derived facts |
+| S4 | Alignment Quorum | LLM (Always) | 3-voter intention alignment check |
+| S5 | Threat Sentinel | LLM (Conditional) | Threat classification when risk >= MEDIUM |
+| S6 | Policy Arbiter | LLM (Conditional) | Fact derivation only (never makes decisions) |
+| S7 | Policy Pass 2 | Deterministic | Re-evaluate policy with derived facts |
+| S8 | Aggregate | Deterministic | Final decision: DENY > ESCALATE > ALLOW |
+
+### Decision Logic
+
+```
+DENY > ESCALATE > ALLOW
+
+DENY triggered by:
+  - Policy rule denies action
+  - Alignment quorum votes DENY
+  - Threat sentinel classifies as MALICIOUS
+  - Tool constraints violated
+
+ESCALATE triggered by:
+  - Alignment quorum votes ESCALATE
+  - Threat sentinel classifies as SUSPICIOUS
+  - Policy status is UNCOVERED
+  - Tool requires human review
+
+ALLOW:
+  - All checks pass
+```
 
 ## API
 
@@ -102,14 +152,23 @@ POST /v1/firewall/evaluate
 Content-Type: application/json
 
 {
-  "tool_id": "stripe.refund_payment",
-  "tool_version": "1.0.0",
-  "arguments": {
-    "payment_id": "pi_abc123",
-    "amount": 150.00
+  "org_id": "acme-corp",
+  "actor": {
+    "id": "agent-123",
+    "role": "support-agent",
+    "type": "agent",
+    "org_id": "acme-corp"
   },
-  "context": "Customer requested refund",
-  "intent": "Process customer refund request"
+  "env": "production",
+  "user_intent": "Process customer refund for damaged item",
+  "tool_call": {
+    "action_id": "stripe.refund_payment",
+    "version": "1.0.0",
+    "args": {
+      "payment_id": "pi_abc123",
+      "amount": 50.00
+    }
+  }
 }
 ```
 
@@ -117,103 +176,111 @@ Content-Type: application/json
 
 ```json
 {
-  "decision": "allow",
-  "audit_id": "aud_abc123",
-  "risk_score": 0.35,
-  "pipeline_steps": [
-    {"step": "S0", "status": "pass", "duration_ms": 1},
-    {"step": "S1", "status": "pass", "duration_ms": 2},
-    ...
-  ]
+  "request_id": "req-abc123",
+  "audit_id": "audit-xyz789",
+  "decision": "ALLOW",
+  "base_risk": "MEDIUM",
+  "reasons": ["money_movement", "production_environment"],
+  "alignment": {
+    "decision": "ALLOW",
+    "votes": [
+      {"voter_id": "safety_advocate", "vote": "ALLOW", "confidence": 0.92},
+      {"voter_id": "intent_verifier", "vote": "ALLOW", "confidence": 0.88},
+      {"voter_id": "policy_guardian", "vote": "ALLOW", "confidence": 0.95}
+    ]
+  },
+  "timing": {
+    "s4_alignment_ms": 180,
+    "total_ms": 245
+  }
 }
 ```
 
-## Tool Definitions
+## Tool Schema (v3)
 
-Tools are defined in YAML with schema and risk metadata:
+Tools follow a conventional format (compatible with OpenAI/Claude) with an `invarity` block for firewall metadata:
 
 ```yaml
-apiVersion: invarity.io/v1alpha1
-kind: Tool
-metadata:
-  name: stripe.refund_payment
-  version: 1.0.0
-  description: Refund a Stripe payment
-spec:
-  category: payments
-  subcategory: refunds
-  parameters:
-    type: object
-    properties:
-      payment_id:
-        type: string
-        description: Stripe payment ID
-      amount:
-        type: number
-        description: Refund amount in dollars
-    required:
-      - payment_id
-      - amount
+name: stripe.refund_payment
+description: Refund a Stripe payment
+
+parameters:
+  type: object
+  additionalProperties: false
+  properties:
+    payment_id:
+      type: string
+    amount:
+      type: number
+  required:
+    - payment_id
+    - amount
+
 invarity:
+  id: stripe.refund_payment
+  version: 1.0.0
+
   risk:
-    operation: write
-    side_effect_scope: external
-    resource_scope: single
-    base_risk: 0.4
-    money_movement: true
-    reversibility: difficult
+    base_risk: high           # low, medium, high, critical
+    operation: write          # read, write, delete, execute
+    requires_human_review: false
+    tags: ["financial", "pii"]
+
+  constraints:
+    requires_justification: true
+    required_args: ["payment_id", "amount"]
+    disallow_wildcards: true
+    max_bulk: null
+    amount_limit:
+      max: 10000
+      currency: USD
+      arg_key: amount
 ```
 
-## Policies
+## Toolset Schema
 
-Policies define rules for tool execution:
+Toolsets bundle tool references for assignment to principals:
 
 ```yaml
-apiVersion: invarity.io/v1alpha1
-kind: Policy
-metadata:
-  name: refund-limits
-  version: 1.0.0
-rules:
-  - name: small-refunds
-    condition: tool.name == "stripe.refund_payment" && arguments.amount < 100
-    action: allow
+toolset_id: payments-v1
+revision: "1.0.0"
+display_name: Payments Toolset
 
-  - name: large-refunds
-    condition: tool.name == "stripe.refund_payment" && arguments.amount >= 1000
-    action: escalate
-    message: "Large refunds require manager approval"
+tools:
+  - tool_id: stripe.refund_payment
+    version: 1.0.0
+  - tool_id: stripe.create_charge
+    version: 1.0.0
 
-  - name: default
-    condition: "true"
-    action: allow
+labels:
+  team: payments
+  owner: team@example.com
 ```
 
 ## CLI Commands
 
 ```
 invarity
-├── ping                    # Health check
-├── simulate                # Evaluate tool call
+├── ping                           # Health check
+├── simulate                       # Evaluate tool call
+├── version                        # Display version
+│
 ├── tools
-│   ├── validate            # Validate tool manifest
-│   ├── register            # Register tool with server
-│   ├── validate-dir        # Batch validate directory
-│   └── register-dir        # Batch register directory
+│   ├── validate                   # Validate tool manifest
+│   ├── register                   # Register tool to tenant library
+│   ├── validate-dir               # Batch validate directory
+│   └── register-dir               # Batch register directory
+│
 ├── toolsets
-│   ├── validate            # Validate toolset manifest
-│   ├── apply               # Apply toolset to server
-│   └── lint                # Lint toolset references
-├── policy
-│   ├── validate            # Validate policy syntax
-│   ├── diff                # Compare local vs server
-│   ├── apply               # Upload policy for compilation
-│   ├── status              # Check compilation status
-│   ├── fuzziness           # View unresolved terms
-│   └── promote             # Activate compiled policy
-├── audit
-│   └── show                # Retrieve audit record
-└── version                 # Display version
+│   ├── validate                   # Validate toolset manifest
+│   ├── register                   # Register toolset to tenant library
+│   └── lint                       # Lint toolset references against tools
+│
+├── principals
+│   └── apply-toolset              # Apply toolset to a principal
+│
+└── audit
+    └── show                       # Retrieve audit record
 ```
 
 ## Configuration
@@ -222,48 +289,60 @@ invarity
 
 The CLI loads configuration from (in order of precedence):
 
-1. Command-line flags
+1. Command-line flags (`--server`, `--api-key`, `--tenant`, `--principal`)
 2. Environment variables
 3. `~/.invarity/config.yaml`
 4. Defaults
 
 ```yaml
 # ~/.invarity/config.yaml
-server: https://api.invarity.io
-org_id: org_abc123
-project_id: proj_xyz
-env: production
+server: https://api.invarity.dev
+api_key: your-api-key-here
+tenant_id: acme
+principal_id: my-agent
 ```
 
 Environment variables:
 - `INVARITY_SERVER`
 - `INVARITY_API_KEY`
-- `INVARITY_ORG_ID`
-- `INVARITY_ENV`
-- `INVARITY_PROJECT_ID`
-- `INVARITY_TOOLSET_ID`
+- `INVARITY_TENANT_ID`
+- `INVARITY_PRINCIPAL_ID`
 
 ### Server Configuration
 
 ```bash
-# Server settings
+# Server
 PORT=8080
 LOG_LEVEL=info
 
-# LLM endpoints
-FUNCTIONGEMMA_BASE_URL=http://localhost:8081
-FUNCTIONGEMMA_API_KEY=your-key
-LLAMAGUARD_BASE_URL=http://localhost:8082
-LLAMAGUARD_API_KEY=your-key
-QWEN_BASE_URL=http://localhost:8083
-QWEN_API_KEY=your-key
+# LLM Endpoints (OpenAI-compatible)
+FUNCTIONGEMMA_BASE_URL=http://localhost:8001/v1
+FUNCTIONGEMMA_API_KEY=
+LLAMAGUARD_BASE_URL=http://localhost:8002/v1
+LLAMAGUARD_API_KEY=
+QWEN_BASE_URL=http://localhost:8003/v1
+QWEN_API_KEY=
 
-# Limits
+# Request Limits
 REQUEST_MAX_BYTES=1048576
-MAX_CONTEXT_CHARS=4000
-MAX_INTENT_CHARS=1000
+MAX_CONTEXT_CHARS=32000
+MAX_INTENT_CHARS=4000
 CACHE_TTL_SECONDS=300
+
+# Feature Flags
+ENABLE_THREAT_SENTINEL=true
+ENABLE_POLICY_ARBITER=true
 ```
+
+## LLM Integration
+
+The firewall uses three self-hosted LLM services via OpenAI-compatible APIs:
+
+| Model | Purpose | Called |
+|-------|---------|--------|
+| **FunctionGemma** | 3-voter alignment quorum | Always |
+| **Llama Guard 3** | Threat classification | When risk >= MEDIUM |
+| **Qwen** | Fact derivation for policy | When needed by policy |
 
 ## Deployment
 
@@ -289,13 +368,27 @@ npm install
 ```
 
 Infrastructure includes:
-- VPC with public/private subnets
+- VPC with public/private subnets (2 AZs)
 - Application Load Balancer
 - ECS Fargate service
-- DynamoDB tables (6 tables for multi-tenant data)
+- DynamoDB tables (8 tables for multi-tenant data)
 - S3 buckets (manifests and audit logs)
+- Cognito User Pool for authentication
 - KMS encryption
 - CloudWatch logging
+
+### DynamoDB Tables
+
+| Table | Purpose |
+|-------|---------|
+| `tenants` | Tenant configuration |
+| `principals` | API principals (agents/services) per tenant |
+| `tools-v2` | Tool definitions (immutable versions) |
+| `toolsets-v2` | Toolset configurations (immutable revisions) |
+| `audit-index` | Audit log index |
+| `users` | Cognito user mirror |
+| `tenant-memberships` | User to tenant role mappings |
+| `tokens` | Developer and agent runtime tokens |
 
 ## Development
 
@@ -303,7 +396,7 @@ Infrastructure includes:
 
 ```bash
 # CLI
-cd invarity-cli && make build
+cd invarity-cli && go build ./cmd/invarity
 
 # Server
 cd invarity-go && make build
@@ -316,9 +409,9 @@ cd invarity-infra && npm run build
 
 ```bash
 # CLI
-cd invarity-cli && make test
+cd invarity-cli && go test ./...
 
-# Server (with coverage)
+# Server
 cd invarity-go && make test-coverage
 ```
 
@@ -334,37 +427,41 @@ cd invarity-go && make lint
 ```
 invarity/
 ├── invarity-cli/
-│   ├── cmd/invarity/          # CLI entry point
+│   ├── cmd/invarity/              # CLI entry point
 │   ├── internal/
-│   │   ├── cli/               # Command implementations
-│   │   ├── client/            # HTTP client
-│   │   ├── config/            # Configuration
-│   │   ├── policy/            # Policy validation
-│   │   ├── poller/            # Async polling
-│   │   └── validate/          # Schema validation
-│   └── examples/              # Tool, toolset, policy examples
+│   │   ├── cli/                   # Command implementations (cobra)
+│   │   ├── client/                # HTTP client
+│   │   ├── config/                # Configuration loading
+│   │   ├── poller/                # Async polling utilities
+│   │   └── validate/              # JSON Schema validation
+│   ├── schemas/                   # Tool and toolset JSON schemas
+│   └── examples/                  # Example manifests
 │
 ├── invarity-go/
-│   ├── cmd/server/            # Server entry point
+│   ├── cmd/server/                # Server entry point
 │   ├── internal/
-│   │   ├── audit/             # Audit logging
-│   │   ├── config/            # Configuration
-│   │   ├── firewall/          # Decision pipeline
-│   │   ├── http/              # HTTP handlers
-│   │   ├── llm/               # LLM clients
-│   │   ├── policy/            # Policy evaluation
-│   │   ├── registry/          # Tool registry
-│   │   ├── risk/              # Risk computation
-│   │   └── types/             # Domain types
-│   └── test/                  # Integration tests
+│   │   ├── audit/                 # Audit record storage
+│   │   ├── config/                # Environment configuration
+│   │   ├── firewall/              # 8-step decision pipeline
+│   │   ├── http/                  # Handlers and router (chi)
+│   │   ├── llm/                   # LLM clients (alignment, threat, arbiter)
+│   │   ├── policy/                # Policy storage and evaluation
+│   │   ├── registry/              # Tool registry and schema validation
+│   │   ├── risk/                  # Deterministic risk computation
+│   │   ├── types/                 # Shared domain types
+│   │   └── util/                  # Utilities
+│   └── test/                      # Unit tests
 │
 └── invarity-infra/
-    ├── bin/                   # CDK app entry
-    ├── lib/                   # Stack definitions
-    ├── env/                   # Environment configs
-    └── scripts/               # Deployment scripts
+    ├── bin/                       # CDK app entry point
+    ├── lib/                       # Stack definitions
+    │   ├── firewall-stack.ts      # Main infrastructure stack
+    │   └── identity.ts            # Identity construct (Cognito + DynamoDB)
+    ├── env/                       # Environment configs (dev.json, prod.json)
+    ├── scripts/                   # Deployment scripts
+    └── .github/workflows/         # CI/CD workflows
 ```
 
 ## License
 
-Proprietary - All rights reserved.
+Proprietary - Invarity Inc.

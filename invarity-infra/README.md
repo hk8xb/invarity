@@ -27,9 +27,11 @@ All data storage is designed for tenant isolation:
 |-------|--------------|----------|------|---------|
 | `tenants` | `tenant_id` | - | - | Tenant configuration, includes `default_kms_key_arn` for future per-tenant encryption |
 | `principals` | `tenant_id` | `principal_id` | - | API principals (agents/services) per tenant, references active `toolset_id#revision` |
-| `tools` | `tenant_id` | `tool_version` (`<tool_id>#<version>`) | `tool-versions-index` | Tenant-scoped tool definitions (immutable versions) |
-| `toolsets` | `tenant_id` | `toolset_revision` (`<toolset_id>#<revision>`) | `toolset-revisions-index` | Tenant-scoped toolset configurations (immutable revisions) |
+| `tools-v2` | `tenant_id` | `tool_version` (`<tool_id>#<version>`) | `tool-versions-index` | Tenant-scoped tool definitions (immutable versions) |
+| `toolsets-v2` | `tenant_id` | `toolset_revision` (`<toolset_id>#<revision>`) | `toolset-revisions-index` | Tenant-scoped toolset configurations (immutable revisions) |
 | `audit-index` | `tenant_id` | `created_at#audit_id` | `principal-index` | Audit log index |
+
+> **Note**: The `tools-v2` and `toolsets-v2` tables have a `-v2` suffix due to a CloudFormation schema migration. The environment variables and SSM parameters reference the correct table names automatically.
 
 #### Identity Tables
 
