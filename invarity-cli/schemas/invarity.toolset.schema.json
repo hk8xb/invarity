@@ -1,49 +1,105 @@
 {
   "$schema": "https://json-schema.org/draft/2020-12/schema",
-  "$id": "https://invarity.ai/schemas/invarity.toolset.schema.json",
-  "title": "Invarity Toolset Definition (v1)",
+  "$id": "https://invarity.ai/schemas/invarity.toolset.schema.v1.json",
+  "title": "Invarity Toolset Manifest (tenant-scoped, references tools, v1)",
   "type": "object",
-  "additionalProperties": true,
-  "required": ["toolset_id", "tools"],
+  "additionalProperties": false,
+  "required": ["toolset_id", "revision", "tools"],
   "properties": {
-    "toolset_id": { "type": "string", "minLength": 1, "maxLength": 128 },
-    "description": { "type": "string", "maxLength": 2000 },
-    "envs": {
-      "type": "array",
-      "items": { "type": "string", "enum": ["sandbox", "prod"] },
-      "minItems": 1,
-      "maxItems": 2,
-      "uniqueItems": true
+    "toolset_id": {
+      "type": "string",
+      "description": "Stable identifier for a toolset (bundle). Revisions create new immutable versions.",
+      "minLength": 1,
+      "maxLength": 128
     },
-    "status": { "type": "string", "enum": ["DRAFT", "ACTIVE", "DEPRECATED"] },
+
+    "revision": {
+      "type": "string",
+      "description": "Immutable revision identifier for this toolset. Recommended: semver or monotonically increasing string (e.g. '1', '2', '2025-01-01').",
+      "minLength": 1,
+      "maxLength": 64
+    },
+
+    "display_name": {
+      "type": "string",
+      "description": "Optional human-friendly name.",
+      "minLength": 1,
+      "maxLength": 128
+    },
+
+    "description": {
+      "type": "string",
+      "description": "Optional description. Keep short to avoid LLM context bloat in UIs.",
+      "minLength": 0,
+      "maxLength": 2000
+    },
+
+    "labels": {
+      "type": "object",
+      "description": "Optional key-value labels for UI filtering/grouping.",
+      "additionalProperties": {
+        "type": "string",
+        "minLength": 0,
+        "maxLength": 128
+      },
+      "maxProperties": 32
+    },
+
     "tools": {
       "type": "array",
+      "description": "List of tool references included in this toolset. Each tool must already exist in the tenant tool registry.",
       "minItems": 1,
-      "maxItems": 5000,
+      "maxItems": 500,
       "items": {
         "type": "object",
         "additionalProperties": false,
-        "required": ["id", "version"],
+        "required": ["tool_id", "version"],
         "properties": {
-          "id": { "type": "string", "minLength": 1, "maxLength": 256 },
+          "tool_id": {
+            "type": "string",
+            "description": "Tool identifier (must match invarity.id from the tool manifest).",
+            "minLength": 1,
+            "maxLength": 256
+          },
           "version": {
             "type": "string",
+            "description": "Tool semantic version (must match tool manifest invarity.version).",
             "pattern": "^(0|[1-9]\\d*)\\.(0|[1-9]\\d*)\\.(0|[1-9]\\d*)(?:-[0-9A-Za-z-.]+)?(?:\\+[0-9A-Za-z-.]+)?$"
+          },
+
+          "alias": {
+            "type": "string",
+            "description": "Optional per-tool alias within this toolset for display purposes only (not used for resolution).",
+            "minLength": 1,
+            "maxLength": 64
+          },
+
+          "required": {
+            "type": "boolean",
+            "description": "Optional. If false, tool is included but can be disabled by runtime config later. MVP may ignore.",
+            "default": true
+          },
+
+          "notes": {
+            "type": "string",
+            "description": "Optional. Not used for enforcement.",
+            "maxLength": 512
           }
         }
       }
     },
-    "policy": {
+
+    "defaults": {
       "type": "object",
+      "description": "Optional toolset-wide defaults for future extension (MVP can ignore).",
       "additionalProperties": false,
       "properties": {
-        "bundle_id": { "type": "string", "minLength": 1, "maxLength": 256 },
-        "version": { "type": "string", "maxLength": 128 }
+        "environment": {
+          "type": "string",
+          "description": "Suggested environment name for this toolset (UI hint only).",
+          "enum": ["dev", "staging", "prod"]
+        }
       }
-    },
-    "labels": {
-      "type": "object",
-      "additionalProperties": { "type": "string", "maxLength": 128 }
     }
   }
 }

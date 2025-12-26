@@ -196,11 +196,13 @@ export class FirewallStack extends cdk.Stack {
       encryptionKey: kmsKey,
     });
 
-    // Tools Table - PK: tenant_id#principal_id, SK: tool_key
-    const toolsTable = new dynamodb.Table(this, 'ToolsTable', {
-      tableName: `${prefix}-tools`,
-      partitionKey: { name: 'tenant_principal', type: dynamodb.AttributeType.STRING },
-      sortKey: { name: 'tool_key', type: dynamodb.AttributeType.STRING },
+    // Tools Table - PK: tenant_id, SK: tool_id#version (tenant-scoped registry)
+    // Attributes: schema_hash, name, description, created_at, s3_key
+    // S3 path: manifests/{tenant}/tools/{tool_id}/{version}.json
+    const toolsTable = new dynamodb.Table(this, 'ToolsTableV2', {
+      tableName: `${prefix}-tools-v2`,
+      partitionKey: { name: 'tenant_id', type: dynamodb.AttributeType.STRING },
+      sortKey: { name: 'tool_version', type: dynamodb.AttributeType.STRING }, // tool_id#version
       billingMode: dynamodb.BillingMode.PAY_PER_REQUEST,
       pointInTimeRecovery: true,
       removalPolicy: cdk.RemovalPolicy.RETAIN,
@@ -208,28 +210,34 @@ export class FirewallStack extends cdk.Stack {
       encryptionKey: kmsKey,
     });
 
-    // Toolsets Table - PK: tenant_id#principal_id, SK: toolset_id
-    const toolsetsTable = new dynamodb.Table(this, 'ToolsetsTable', {
-      tableName: `${prefix}-toolsets`,
-      partitionKey: { name: 'tenant_principal', type: dynamodb.AttributeType.STRING },
+    // GSI for listing versions of a specific tool
+    toolsTable.addGlobalSecondaryIndex({
+      indexName: 'tool-versions-index',
+      partitionKey: { name: 'tenant_id', type: dynamodb.AttributeType.STRING },
+      sortKey: { name: 'tool_id', type: dynamodb.AttributeType.STRING },
+      projectionType: dynamodb.ProjectionType.ALL,
+    });
+
+    // Toolsets Table - PK: tenant_id, SK: toolset_id#revision (tenant-scoped registry)
+    // Attributes: created_at, s3_key, tool_refs (list of {tool_id, version}), metadata
+    // S3 path: manifests/{tenant}/toolsets/{toolset_id}/{revision}.json
+    const toolsetsTable = new dynamodb.Table(this, 'ToolsetsTableV2', {
+      tableName: `${prefix}-toolsets-v2`,
+      partitionKey: { name: 'tenant_id', type: dynamodb.AttributeType.STRING },
+      sortKey: { name: 'toolset_revision', type: dynamodb.AttributeType.STRING }, // toolset_id#revision
+      billingMode: dynamodb.BillingMode.PAY_PER_REQUEST,
+      pointInTimeRecovery: true,
+      removalPolicy: cdk.RemovalPolicy.RETAIN,
+      encryption: dynamodb.TableEncryption.CUSTOMER_MANAGED,
+      encryptionKey: kmsKey,
+    });
+
+    // GSI for listing revisions of a specific toolset
+    toolsetsTable.addGlobalSecondaryIndex({
+      indexName: 'toolset-revisions-index',
+      partitionKey: { name: 'tenant_id', type: dynamodb.AttributeType.STRING },
       sortKey: { name: 'toolset_id', type: dynamodb.AttributeType.STRING },
-      billingMode: dynamodb.BillingMode.PAY_PER_REQUEST,
-      pointInTimeRecovery: true,
-      removalPolicy: cdk.RemovalPolicy.RETAIN,
-      encryption: dynamodb.TableEncryption.CUSTOMER_MANAGED,
-      encryptionKey: kmsKey,
-    });
-
-    // Toolset Revisions Table - PK: tenant_id#principal_id, SK: toolset_id#revision
-    const toolsetRevisionsTable = new dynamodb.Table(this, 'ToolsetRevisionsTable', {
-      tableName: `${prefix}-toolset-revisions`,
-      partitionKey: { name: 'tenant_principal', type: dynamodb.AttributeType.STRING },
-      sortKey: { name: 'toolset_revision', type: dynamodb.AttributeType.STRING },
-      billingMode: dynamodb.BillingMode.PAY_PER_REQUEST,
-      pointInTimeRecovery: true,
-      removalPolicy: cdk.RemovalPolicy.RETAIN,
-      encryption: dynamodb.TableEncryption.CUSTOMER_MANAGED,
-      encryptionKey: kmsKey,
+      projectionType: dynamodb.ProjectionType.ALL,
     });
 
     // Audit Index Table - PK: tenant_id, SK: created_at#audit_id
@@ -328,7 +336,6 @@ export class FirewallStack extends cdk.Stack {
     principalsTable.grantReadWriteData(taskRole);
     toolsTable.grantReadWriteData(taskRole);
     toolsetsTable.grantReadWriteData(taskRole);
-    toolsetRevisionsTable.grantReadWriteData(taskRole);
     auditIndexTable.grantReadWriteData(taskRole);
     manifestsBucket.grantReadWrite(taskRole);
     auditBlobsBucket.grantReadWrite(taskRole);
@@ -359,7 +366,6 @@ export class FirewallStack extends cdk.Stack {
         PRINCIPALS_TABLE: principalsTable.tableName,
         TOOLS_TABLE: toolsTable.tableName,
         TOOLSETS_TABLE: toolsetsTable.tableName,
-        TOOLSET_REVISIONS_TABLE: toolsetRevisionsTable.tableName,
         AUDIT_INDEX_TABLE: auditIndexTable.tableName,
         MANIFESTS_BUCKET: manifestsBucket.bucketName,
         AUDIT_BLOBS_BUCKET: auditBlobsBucket.bucketName,
@@ -479,11 +485,6 @@ export class FirewallStack extends cdk.Stack {
       stringValue: toolsetsTable.tableName,
     });
 
-    new ssm.StringParameter(this, 'SsmToolsetRevisionsTable', {
-      parameterName: `${ssmPrefix}/dynamodb/toolset_revisions_table`,
-      stringValue: toolsetRevisionsTable.tableName,
-    });
-
     new ssm.StringParameter(this, 'SsmAuditIndexTable', {
       parameterName: `${ssmPrefix}/dynamodb/audit_index_table`,
       stringValue: auditIndexTable.tableName,
@@ -569,12 +570,6 @@ export class FirewallStack extends cdk.Stack {
       value: toolsetsTable.tableName,
       description: 'Toolsets DynamoDB Table',
       exportName: `${prefix}-toolsets-table`,
-    });
-
-    new cdk.CfnOutput(this, 'ToolsetRevisionsTableName', {
-      value: toolsetRevisionsTable.tableName,
-      description: 'Toolset Revisions DynamoDB Table',
-      exportName: `${prefix}-toolset-revisions-table`,
     });
 
     new cdk.CfnOutput(this, 'AuditIndexTableName', {

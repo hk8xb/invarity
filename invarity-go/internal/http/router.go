@@ -21,16 +21,20 @@ type Router struct {
 	pipeline          *firewall.Pipeline
 	cognitoVerifier   *auth.CognitoVerifier
 	store             *store.DynamoDBStore
+	s3Client          *store.S3Client
 	onboardingHandler *OnboardingHandler
+	toolsHandler      *ToolsHandler
+	toolsetsHandler   *ToolsetsHandler
 	tenantAuth        *auth.TenantAuthMiddleware
 }
 
 // RouterConfig holds configuration for creating a router.
 type RouterConfig struct {
-	Logger            *zap.Logger
-	Pipeline          *firewall.Pipeline
-	CognitoVerifier   *auth.CognitoVerifier   // Optional: for control plane auth
-	Store             *store.DynamoDBStore    // Optional: for control plane endpoints
+	Logger             *zap.Logger
+	Pipeline           *firewall.Pipeline
+	CognitoVerifier    *auth.CognitoVerifier  // Optional: for control plane auth
+	Store              *store.DynamoDBStore   // Optional: for control plane endpoints
+	S3Client           *store.S3Client        // Optional: for storing manifests
 	EnableControlPlane bool                   // Whether to enable control plane endpoints
 }
 
@@ -42,12 +46,15 @@ func NewRouter(cfg RouterConfig) *Router {
 		pipeline:        cfg.Pipeline,
 		cognitoVerifier: cfg.CognitoVerifier,
 		store:           cfg.Store,
+		s3Client:        cfg.S3Client,
 	}
 
 	// Initialize control plane handlers if enabled
 	if cfg.EnableControlPlane && cfg.Store != nil {
 		r.onboardingHandler = NewOnboardingHandler(cfg.Store, cfg.Logger)
 		r.tenantAuth = auth.NewTenantAuthMiddleware(cfg.Store)
+		r.toolsHandler = NewToolsHandler(cfg.Store, cfg.S3Client, cfg.Logger)
+		r.toolsetsHandler = NewToolsetsHandler(cfg.Store, cfg.S3Client, cfg.Logger)
 	}
 
 	// Middleware
@@ -91,6 +98,23 @@ func NewRouter(cfg RouterConfig) *Router {
 				tenant.Route("/principals", func(principals chi.Router) {
 					principals.With(auth.RequireScope(auth.ScopePrincipalsRead)).Get("/", r.onboardingHandler.HandleListPrincipals)
 					principals.With(auth.RequireScope(auth.ScopePrincipalsWrite)).Post("/", r.onboardingHandler.HandleCreatePrincipal)
+
+					// Apply toolset to principal
+					principals.With(auth.RequireScope(auth.ScopePrincipalsWrite)).Post("/{principal_id}/toolsets:apply", r.toolsetsHandler.HandleApplyToolset)
+				})
+
+				// Tools (tenant-scoped)
+				tenant.Route("/tools", func(tools chi.Router) {
+					tools.With(auth.RequireScope(auth.ScopeToolsRead)).Get("/", r.toolsHandler.HandleListTools)
+					tools.With(auth.RequireScope(auth.ScopeToolsWrite)).Post("/", r.toolsHandler.HandleRegisterTool)
+					tools.With(auth.RequireScope(auth.ScopeToolsRead)).Get("/{tool_id}/{version}", r.toolsHandler.HandleGetTool)
+				})
+
+				// Toolsets (tenant-scoped)
+				tenant.Route("/toolsets", func(toolsets chi.Router) {
+					toolsets.With(auth.RequireScope(auth.ScopeToolsetsRead)).Get("/", r.toolsetsHandler.HandleListToolsets)
+					toolsets.With(auth.RequireScope(auth.ScopeToolsetsWrite)).Post("/", r.toolsetsHandler.HandleRegisterToolset)
+					toolsets.With(auth.RequireScope(auth.ScopeToolsetsRead)).Get("/{toolset_id}/{revision}", r.toolsetsHandler.HandleGetToolset)
 				})
 			})
 		}

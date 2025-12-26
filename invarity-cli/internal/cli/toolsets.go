@@ -5,7 +5,6 @@ import (
 	"encoding/json"
 	"fmt"
 	"os"
-	"strings"
 	"time"
 
 	"github.com/spf13/cobra"
@@ -17,22 +16,22 @@ import (
 var toolsetsCmd = &cobra.Command{
 	Use:   "toolsets",
 	Short: "Manage toolsets",
-	Long:  `Commands for validating, applying, and linting toolsets.`,
+	Long: `Commands for validating, registering, and linting toolsets.
+
+Toolsets are registered to a tenant's toolset library. They bundle tool references
+and can be applied to principals using the 'principals apply-toolset' command.`,
 }
 
 var (
-	toolsetsFile      string
-	toolsetsToolDir   string
-	toolsetsEnv       string
-	toolsetsStatus    string
-	toolsetsTenant    string
-	toolsetsPrincipal string
+	toolsetsFile    string
+	toolsetsToolDir string
+	toolsetsTenant  string
 )
 
 func init() {
 	// Add subcommands
 	toolsetsCmd.AddCommand(toolsetsValidateCmd)
-	toolsetsCmd.AddCommand(toolsetsApplyCmd)
+	toolsetsCmd.AddCommand(toolsetsRegisterCmd)
 	toolsetsCmd.AddCommand(toolsetsLintCmd)
 }
 
@@ -88,11 +87,8 @@ func runToolsetsValidate(cmd *cobra.Command, args []string) error {
 		if err == nil {
 			printSection("Summary")
 			printKeyValue("Toolset ID", toolset.ToolsetID)
-			if toolset.Status != "" {
-				printKeyValue("Status", toolset.Status)
-			}
-			if len(toolset.Envs) > 0 {
-				printKeyValue("Environments", strings.Join(toolset.Envs, ", "))
+			if toolset.Revision != "" {
+				printKeyValue("Revision", toolset.Revision)
 			}
 			printKeyValue("Tool Count", fmt.Sprintf("%d", len(toolset.Tools)))
 		}
@@ -115,52 +111,45 @@ func runToolsetsValidate(cmd *cobra.Command, args []string) error {
 }
 
 // ============================================================================
-// toolsets apply
+// toolsets register
 // ============================================================================
 
-var toolsetsApplyCmd = &cobra.Command{
-	Use:   "apply",
-	Short: "Apply a toolset to the registry",
-	Long: `Validates a toolset locally and applies it to the Invarity registry.
+var toolsetsRegisterCmd = &cobra.Command{
+	Use:   "register",
+	Short: "Register a toolset with the tenant's toolset library",
+	Long: `Validates a toolset locally and registers it with the tenant's toolset library.
 
-The toolset is scoped to a tenant and principal. Use --env and --status
-to override values in the manifest.
+Toolsets are registered to a tenant (not a principal). Once registered, toolsets
+can be applied to principals using the 'principals apply-toolset' command.
 
 When --tools-dir is provided:
-  1. Loads all tool manifests from the directory
-  2. Verifies that all tools referenced in the toolset exist
-  3. Automatically registers the referenced tools before applying the toolset
-  4. Only tools referenced by the toolset are registered (not all tools in dir)
+  1. Verifies that all tools referenced in the toolset exist in the directory
+  2. Automatically registers the referenced tools before registering the toolset
+  3. Only tools referenced by the toolset are registered (not all tools in dir)
 
 Exit Codes:
   0 - Success
   1 - Validation failed (no network calls made)
   2 - Network/server error`,
-	Example: `  # Apply a toolset (requires --principal)
-  invarity toolsets apply -f toolset.yaml --principal my-agent
+	Example: `  # Register a toolset to the tenant's library
+  invarity toolsets register -f toolset.yaml
 
-  # Apply with auto-registration of tools
-  invarity toolsets apply -f toolset.yaml --principal my-agent --tools-dir ./tools
-
-  # Override environment and status
-  invarity toolsets apply -f toolset.yaml --principal my-agent --env prod --status ACTIVE
+  # Register with auto-registration of referenced tools
+  invarity toolsets register -f toolset.yaml --tools-dir ./tools
 
   # With explicit tenant
-  invarity toolsets apply -f toolset.yaml --tenant acme --principal my-agent`,
-	RunE: runToolsetsApply,
+  invarity toolsets register -f toolset.yaml --tenant acme`,
+	RunE: runToolsetsRegister,
 }
 
 func init() {
-	toolsetsApplyCmd.Flags().StringVarP(&toolsetsFile, "file", "f", "", "Path to toolset file (required)")
-	toolsetsApplyCmd.Flags().StringVar(&toolsetsEnv, "env", "", "Environment override (sandbox, prod)")
-	toolsetsApplyCmd.Flags().StringVar(&toolsetsStatus, "status", "", "Status override (DRAFT, ACTIVE, DEPRECATED)")
-	toolsetsApplyCmd.Flags().StringVar(&toolsetsToolDir, "tools-dir", "", "Path to tools directory (auto-registers referenced tools)")
-	toolsetsApplyCmd.Flags().StringVar(&toolsetsTenant, "tenant", "", "Tenant ID (uses config default if not specified)")
-	toolsetsApplyCmd.Flags().StringVar(&toolsetsPrincipal, "principal", "", "Principal ID (required unless config default is set)")
-	toolsetsApplyCmd.MarkFlagRequired("file")
+	toolsetsRegisterCmd.Flags().StringVarP(&toolsetsFile, "file", "f", "", "Path to toolset file (required)")
+	toolsetsRegisterCmd.Flags().StringVar(&toolsetsToolDir, "tools-dir", "", "Path to tools directory (auto-registers referenced tools)")
+	toolsetsRegisterCmd.Flags().StringVar(&toolsetsTenant, "tenant", "", "Tenant ID (uses config default, or 'default' if not specified)")
+	toolsetsRegisterCmd.MarkFlagRequired("file")
 }
 
-func runToolsetsApply(cmd *cobra.Command, args []string) error {
+func runToolsetsRegister(cmd *cobra.Command, args []string) error {
 	cfg, err := loadConfig()
 	if err != nil {
 		return err
@@ -170,12 +159,9 @@ func runToolsetsApply(cmd *cobra.Command, args []string) error {
 	if toolsetsTenant != "" {
 		cfg.TenantID = toolsetsTenant
 	}
-	if toolsetsPrincipal != "" {
-		cfg.PrincipalID = toolsetsPrincipal
-	}
 
-	// Validate configuration
-	if err := cfg.ValidateForTools(); err != nil {
+	// Validate configuration (toolsets don't require principal)
+	if err := cfg.ValidateForToolsets(); err != nil {
 		return err
 	}
 
@@ -193,7 +179,7 @@ func runToolsetsApply(cmd *cobra.Command, args []string) error {
 	}
 
 	if !result.Valid {
-		printError("Toolset manifest validation failed - cannot apply")
+		printError("Toolset manifest validation failed - cannot register")
 		for _, e := range result.Errors {
 			if e.Path != "" {
 				fmt.Fprintf(os.Stderr, "  • %s: %s\n", errorColor.Sprint(e.Path), e.Message)
@@ -228,28 +214,22 @@ func runToolsetsApply(cmd *cobra.Command, args []string) error {
 
 	// If --tools-dir is provided, auto-register referenced tools
 	if toolsetsToolDir != "" {
-		if err := autoRegisterToolsForToolset(c, tenantID, cfg.PrincipalID, toolset, toolsetsToolDir); err != nil {
+		if err := autoRegisterToolsForToolset(c, tenantID, toolset, toolsetsToolDir); err != nil {
 			return err
 		}
-	}
-
-	req := &client.ToolsetApplyRequest{
-		Toolset: toolsetRaw,
-		Env:     toolsetsEnv,
-		Status:  toolsetsStatus,
 	}
 
 	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
 	defer cancel()
 
-	applyResp, rawJSON, err := c.ApplyToolsetScoped(ctx, tenantID, cfg.PrincipalID, req)
+	regResp, rawJSON, err := c.RegisterToolset(ctx, tenantID, toolsetRaw)
 	if err != nil {
 		if client.IsNotSupportedError(err) {
-			printWarn("Server does not support principal-scoped toolset application yet.")
-			printInfo("The toolset manifest is valid and ready to be applied when the server supports it.")
+			printWarn("Server does not support tenant-scoped toolset registration yet.")
+			printInfo("The toolset manifest is valid and ready to be registered when the server supports it.")
 			os.Exit(ExitNetworkError)
 		}
-		printError("Toolset application failed: %v", err)
+		printError("Toolset registration failed: %v", err)
 		os.Exit(ExitNetworkError)
 	}
 
@@ -260,25 +240,20 @@ func runToolsetsApply(cmd *cobra.Command, args []string) error {
 	}
 
 	// Human-readable output
-	printSuccess("Toolset applied successfully")
-	printKeyValue("Toolset ID", applyResp.ToolsetID)
-	printKeyValue("Revision", applyResp.Revision)
-	printKeyValue("Status", applyResp.Status)
+	printSuccess("Toolset registered successfully")
+	printKeyValue("Toolset ID", regResp.ToolsetID)
+	printKeyValue("Revision", regResp.Revision)
 	printKeyValue("Tenant", tenantID)
-	printKeyValue("Principal", cfg.PrincipalID)
-	if len(applyResp.Envs) > 0 {
-		printKeyValue("Environments", strings.Join(applyResp.Envs, ", "))
-	}
-	printKeyValue("Tool Count", fmt.Sprintf("%d", applyResp.ToolCount))
-	if applyResp.Message != "" {
-		printKeyValue("Message", applyResp.Message)
+	printKeyValue("Tool Count", fmt.Sprintf("%d", regResp.ToolCount))
+	if regResp.Message != "" {
+		printKeyValue("Message", regResp.Message)
 	}
 
 	return nil
 }
 
 // autoRegisterToolsForToolset registers all tools referenced by the toolset from the tools directory.
-func autoRegisterToolsForToolset(c *client.Client, tenantID, principalID string, toolset *validate.Toolset, toolsDir string) error {
+func autoRegisterToolsForToolset(c *client.Client, tenantID string, toolset *validate.Toolset, toolsDir string) error {
 	// Build set of referenced tool keys
 	referencedTools := make(map[string]validate.ToolRef)
 	for _, ref := range toolset.Tools {
@@ -319,7 +294,7 @@ func autoRegisterToolsForToolset(c *client.Client, tenantID, principalID string,
 	}
 
 	if len(missingTools) > 0 {
-		printError("Cannot apply toolset - missing tools in %s:", toolsDir)
+		printError("Cannot register toolset - missing tools in %s:", toolsDir)
 		for _, ref := range missingTools {
 			fmt.Fprintf(os.Stderr, "  • %s@%s\n", errorColor.Sprint(ref.ID), ref.Version)
 		}
@@ -368,12 +343,12 @@ func autoRegisterToolsForToolset(c *client.Client, tenantID, principalID string,
 		}
 
 		ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
-		_, _, err = c.RegisterToolScoped(ctx, tenantID, principalID, tool)
+		_, _, err = c.RegisterToolScoped(ctx, tenantID, tool)
 		cancel()
 
 		if err != nil {
 			if client.IsNotSupportedError(err) {
-				printWarn("Server does not support principal-scoped tool registration yet.")
+				printWarn("Server does not support tenant-scoped tool registration yet.")
 				os.Exit(ExitNetworkError)
 			}
 			printWarn("Failed to register %s@%s: %v", parsedTool.ID, parsedTool.Version, err)
@@ -408,7 +383,7 @@ var toolsetsLintCmd = &cobra.Command{
 This command:
 - Loads the toolset manifest
 - Scans the tools directory for all tool definitions
-- Verifies each tool reference {id, version} exists
+- Verifies each tool reference {tool_id, version} exists
 - Reports missing references and unreferenced tools`,
 	Example: `  invarity toolsets lint -f toolset.yaml --tools-dir ./tools
   invarity toolsets lint -f toolset.json --tools-dir ./tools --json`,

@@ -23,6 +23,8 @@ type DynamoDBConfig struct {
 	MembershipsTable string
 	PrincipalsTable  string
 	TokensTable      string
+	ToolsTable       string
+	ToolsetsTable    string
 }
 
 // DynamoDBStore implements data access for DynamoDB.
@@ -511,6 +513,328 @@ func (s *DynamoDBStore) ValidateToken(ctx context.Context, plaintext string) (*T
 	}
 
 	return &token, nil
+}
+
+// --- Tool Operations ---
+
+// ToolRecord represents a tool stored in DynamoDB.
+// Uses composite key: tenant_id (PK) + tool_id#version (SK)
+type ToolRecord struct {
+	TenantID   string `dynamodbav:"tenant_id"`
+	SK         string `dynamodbav:"sk"` // tool_id#version
+	ToolID     string `dynamodbav:"tool_id"`
+	Version    string `dynamodbav:"version"`
+	SchemaHash string `dynamodbav:"schema_hash"`
+	Name       string `dynamodbav:"name"`
+	RiskLevel  string `dynamodbav:"risk_level"`
+	S3Key      string `dynamodbav:"s3_key"`
+	Status     string `dynamodbav:"status"` // "active", "deprecated"
+	CreatedAt  string `dynamodbav:"created_at"`
+	UpdatedAt  string `dynamodbav:"updated_at"`
+}
+
+// UpsertTool creates or updates a tool metadata record.
+// Returns (isNew, error) - isNew is true if this was a new tool version.
+func (s *DynamoDBStore) UpsertTool(ctx context.Context, tenantID, toolID, version, schemaHash, name, riskLevel, s3Key string) (bool, error) {
+	now := time.Now().UTC()
+	sk := toolID + "#" + version
+
+	// First, try to get existing record to check for conflicts
+	existing, err := s.GetToolRecord(ctx, tenantID, toolID, version)
+	if err != nil {
+		return false, err
+	}
+
+	if existing != nil {
+		// Tool version exists - check schema hash for idempotency
+		if existing.SchemaHash == schemaHash {
+			// Idempotent - same content, return success
+			return false, nil
+		}
+		// Different hash = conflict
+		return false, fmt.Errorf("conflict: tool %s version %s already exists with different schema hash", toolID, version)
+	}
+
+	// New tool version - insert
+	record := &ToolRecord{
+		TenantID:   tenantID,
+		SK:         sk,
+		ToolID:     toolID,
+		Version:    version,
+		SchemaHash: schemaHash,
+		Name:       name,
+		RiskLevel:  riskLevel,
+		S3Key:      s3Key,
+		Status:     "active",
+		CreatedAt:  now.Format(time.RFC3339),
+		UpdatedAt:  now.Format(time.RFC3339),
+	}
+
+	item, err := attributevalue.MarshalMap(record)
+	if err != nil {
+		return false, fmt.Errorf("failed to marshal tool record: %w", err)
+	}
+
+	// Conditional put to avoid race conditions
+	_, err = s.client.PutItem(ctx, &dynamodb.PutItemInput{
+		TableName:           aws.String(s.config.ToolsTable),
+		Item:                item,
+		ConditionExpression: aws.String("attribute_not_exists(tenant_id) AND attribute_not_exists(sk)"),
+	})
+	if err != nil {
+		var condErr *ddbtypes.ConditionalCheckFailedException
+		if isConditionCheckFailed(err, condErr) {
+			// Race condition - another request created it
+			return false, fmt.Errorf("conflict: tool version created concurrently")
+		}
+		return false, fmt.Errorf("failed to create tool record: %w", err)
+	}
+
+	return true, nil
+}
+
+// GetToolRecord retrieves a tool record by tenant, tool_id, and version.
+func (s *DynamoDBStore) GetToolRecord(ctx context.Context, tenantID, toolID, version string) (*ToolRecord, error) {
+	sk := toolID + "#" + version
+
+	result, err := s.client.GetItem(ctx, &dynamodb.GetItemInput{
+		TableName: aws.String(s.config.ToolsTable),
+		Key: map[string]ddbtypes.AttributeValue{
+			"tenant_id": &ddbtypes.AttributeValueMemberS{Value: tenantID},
+			"sk":        &ddbtypes.AttributeValueMemberS{Value: sk},
+		},
+	})
+	if err != nil {
+		return nil, fmt.Errorf("failed to get tool: %w", err)
+	}
+	if result.Item == nil {
+		return nil, nil
+	}
+
+	var record ToolRecord
+	if err := attributevalue.UnmarshalMap(result.Item, &record); err != nil {
+		return nil, fmt.Errorf("failed to unmarshal tool: %w", err)
+	}
+	return &record, nil
+}
+
+// ListTools lists all tools for a tenant.
+// Returns the latest N tools (optionally with pagination).
+func (s *DynamoDBStore) ListTools(ctx context.Context, tenantID string, limit int32) ([]ToolRecord, error) {
+	if limit <= 0 {
+		limit = 100
+	}
+
+	result, err := s.client.Query(ctx, &dynamodb.QueryInput{
+		TableName:              aws.String(s.config.ToolsTable),
+		KeyConditionExpression: aws.String("tenant_id = :tid"),
+		FilterExpression:       aws.String("#status = :active"),
+		ExpressionAttributeNames: map[string]string{
+			"#status": "status",
+		},
+		ExpressionAttributeValues: map[string]ddbtypes.AttributeValue{
+			":tid":    &ddbtypes.AttributeValueMemberS{Value: tenantID},
+			":active": &ddbtypes.AttributeValueMemberS{Value: "active"},
+		},
+		Limit:            aws.Int32(limit),
+		ScanIndexForward: aws.Bool(false), // Newest first
+	})
+	if err != nil {
+		return nil, fmt.Errorf("failed to list tools: %w", err)
+	}
+
+	var tools []ToolRecord
+	if err := attributevalue.UnmarshalListOfMaps(result.Items, &tools); err != nil {
+		return nil, fmt.Errorf("failed to unmarshal tools: %w", err)
+	}
+	return tools, nil
+}
+
+// --- Toolset Operations ---
+
+// ToolsetRecord represents a toolset stored in DynamoDB.
+// Uses composite key: tenant_id (PK) + toolset_id#revision (SK)
+type ToolsetRecord struct {
+	TenantID   string `dynamodbav:"tenant_id"`
+	SK         string `dynamodbav:"sk"` // toolset_id#revision
+	ToolsetID  string `dynamodbav:"toolset_id"`
+	Revision   string `dynamodbav:"revision"`
+	Name       string `dynamodbav:"name"`
+	ToolCount  int    `dynamodbav:"tool_count"`
+	S3Key      string `dynamodbav:"s3_key"`
+	Status     string `dynamodbav:"status"` // "active", "archived"
+	CreatedAt  string `dynamodbav:"created_at"`
+	UpdatedAt  string `dynamodbav:"updated_at"`
+	CreatedBy  string `dynamodbav:"created_by"`
+}
+
+// RegisterToolset creates a new toolset record.
+// Returns (isNew, error) - isNew is true if this was a new revision.
+func (s *DynamoDBStore) RegisterToolset(ctx context.Context, tenantID, toolsetID, revision, name, s3Key, createdBy string, toolCount int) (bool, error) {
+	now := time.Now().UTC()
+	sk := toolsetID + "#" + revision
+
+	// Check if already exists
+	existing, err := s.GetToolsetRecord(ctx, tenantID, toolsetID, revision)
+	if err != nil {
+		return false, err
+	}
+	if existing != nil {
+		// Idempotent if same S3 key
+		if existing.S3Key == s3Key {
+			return false, nil
+		}
+		return false, fmt.Errorf("conflict: toolset %s revision %s already exists", toolsetID, revision)
+	}
+
+	record := &ToolsetRecord{
+		TenantID:  tenantID,
+		SK:        sk,
+		ToolsetID: toolsetID,
+		Revision:  revision,
+		Name:      name,
+		ToolCount: toolCount,
+		S3Key:     s3Key,
+		Status:    "active",
+		CreatedAt: now.Format(time.RFC3339),
+		UpdatedAt: now.Format(time.RFC3339),
+		CreatedBy: createdBy,
+	}
+
+	item, err := attributevalue.MarshalMap(record)
+	if err != nil {
+		return false, fmt.Errorf("failed to marshal toolset record: %w", err)
+	}
+
+	_, err = s.client.PutItem(ctx, &dynamodb.PutItemInput{
+		TableName:           aws.String(s.config.ToolsetsTable),
+		Item:                item,
+		ConditionExpression: aws.String("attribute_not_exists(tenant_id) AND attribute_not_exists(sk)"),
+	})
+	if err != nil {
+		var condErr *ddbtypes.ConditionalCheckFailedException
+		if isConditionCheckFailed(err, condErr) {
+			return false, fmt.Errorf("conflict: toolset revision created concurrently")
+		}
+		return false, fmt.Errorf("failed to create toolset record: %w", err)
+	}
+
+	return true, nil
+}
+
+// GetToolsetRecord retrieves a toolset record by tenant, toolset_id, and revision.
+func (s *DynamoDBStore) GetToolsetRecord(ctx context.Context, tenantID, toolsetID, revision string) (*ToolsetRecord, error) {
+	sk := toolsetID + "#" + revision
+
+	result, err := s.client.GetItem(ctx, &dynamodb.GetItemInput{
+		TableName: aws.String(s.config.ToolsetsTable),
+		Key: map[string]ddbtypes.AttributeValue{
+			"tenant_id": &ddbtypes.AttributeValueMemberS{Value: tenantID},
+			"sk":        &ddbtypes.AttributeValueMemberS{Value: sk},
+		},
+	})
+	if err != nil {
+		return nil, fmt.Errorf("failed to get toolset: %w", err)
+	}
+	if result.Item == nil {
+		return nil, nil
+	}
+
+	var record ToolsetRecord
+	if err := attributevalue.UnmarshalMap(result.Item, &record); err != nil {
+		return nil, fmt.Errorf("failed to unmarshal toolset: %w", err)
+	}
+	return &record, nil
+}
+
+// ListToolsets lists all toolsets for a tenant.
+func (s *DynamoDBStore) ListToolsets(ctx context.Context, tenantID string, limit int32) ([]ToolsetRecord, error) {
+	if limit <= 0 {
+		limit = 100
+	}
+
+	result, err := s.client.Query(ctx, &dynamodb.QueryInput{
+		TableName:              aws.String(s.config.ToolsetsTable),
+		KeyConditionExpression: aws.String("tenant_id = :tid"),
+		FilterExpression:       aws.String("#status = :active"),
+		ExpressionAttributeNames: map[string]string{
+			"#status": "status",
+		},
+		ExpressionAttributeValues: map[string]ddbtypes.AttributeValue{
+			":tid":    &ddbtypes.AttributeValueMemberS{Value: tenantID},
+			":active": &ddbtypes.AttributeValueMemberS{Value: "active"},
+		},
+		Limit:            aws.Int32(limit),
+		ScanIndexForward: aws.Bool(false),
+	})
+	if err != nil {
+		return nil, fmt.Errorf("failed to list toolsets: %w", err)
+	}
+
+	var toolsets []ToolsetRecord
+	if err := attributevalue.UnmarshalListOfMaps(result.Items, &toolsets); err != nil {
+		return nil, fmt.Errorf("failed to unmarshal toolsets: %w", err)
+	}
+	return toolsets, nil
+}
+
+// --- Principal Active Toolset Operations ---
+
+// SetPrincipalActiveToolset sets the active toolset for a principal.
+func (s *DynamoDBStore) SetPrincipalActiveToolset(ctx context.Context, tenantID, principalID, toolsetID, revision, assignedBy string) error {
+	now := time.Now().UTC()
+
+	_, err := s.client.UpdateItem(ctx, &dynamodb.UpdateItemInput{
+		TableName: aws.String(s.config.PrincipalsTable),
+		Key: map[string]ddbtypes.AttributeValue{
+			"principal_id": &ddbtypes.AttributeValueMemberS{Value: principalID},
+		},
+		UpdateExpression: aws.String("SET active_toolset_id = :tsid, active_toolset_revision = :rev, toolset_assigned_at = :at, toolset_assigned_by = :by, updated_at = :now"),
+		ConditionExpression: aws.String("attribute_exists(principal_id) AND tenant_id = :tid"),
+		ExpressionAttributeValues: map[string]ddbtypes.AttributeValue{
+			":tsid": &ddbtypes.AttributeValueMemberS{Value: toolsetID},
+			":rev":  &ddbtypes.AttributeValueMemberS{Value: revision},
+			":at":   &ddbtypes.AttributeValueMemberS{Value: now.Format(time.RFC3339)},
+			":by":   &ddbtypes.AttributeValueMemberS{Value: assignedBy},
+			":now":  &ddbtypes.AttributeValueMemberS{Value: now.Format(time.RFC3339)},
+			":tid":  &ddbtypes.AttributeValueMemberS{Value: tenantID},
+		},
+	})
+	if err != nil {
+		return fmt.Errorf("failed to set principal active toolset: %w", err)
+	}
+
+	return nil
+}
+
+// GetPrincipalActiveToolset retrieves the active toolset for a principal.
+func (s *DynamoDBStore) GetPrincipalActiveToolset(ctx context.Context, principalID string) (toolsetID, revision string, err error) {
+	result, err := s.client.GetItem(ctx, &dynamodb.GetItemInput{
+		TableName: aws.String(s.config.PrincipalsTable),
+		Key: map[string]ddbtypes.AttributeValue{
+			"principal_id": &ddbtypes.AttributeValueMemberS{Value: principalID},
+		},
+		ProjectionExpression: aws.String("active_toolset_id, active_toolset_revision"),
+	})
+	if err != nil {
+		return "", "", fmt.Errorf("failed to get principal: %w", err)
+	}
+	if result.Item == nil {
+		return "", "", nil
+	}
+
+	if v, ok := result.Item["active_toolset_id"]; ok {
+		if s, ok := v.(*ddbtypes.AttributeValueMemberS); ok {
+			toolsetID = s.Value
+		}
+	}
+	if v, ok := result.Item["active_toolset_revision"]; ok {
+		if s, ok := v.(*ddbtypes.AttributeValueMemberS); ok {
+			revision = s.Value
+		}
+	}
+
+	return toolsetID, revision, nil
 }
 
 // --- Helpers ---

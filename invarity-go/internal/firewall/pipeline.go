@@ -14,6 +14,7 @@ import (
 	"invarity/internal/constraints"
 	"invarity/internal/llm"
 	"invarity/internal/registry"
+	"invarity/internal/store"
 	"invarity/internal/types"
 	"invarity/internal/util"
 )
@@ -21,7 +22,7 @@ import (
 // Pipeline implements the Invarity Firewall decision pipeline.
 // The new MVP pipeline follows these steps:
 // S0: Canonicalize & bounds-check request
-// S1: Schema Validation (deterministic)
+// S1: Tool Resolution & Schema Validation (deterministic)
 // S2: Deterministic Constraints Evaluation
 // S3: Intent Alignment Quorum (ALWAYS-ON)
 // S4: Threat Sentinel (conditional: risk_tier >= MEDIUM)
@@ -29,7 +30,8 @@ import (
 type Pipeline struct {
 	cfg                  *config.Config
 	logger               *zap.Logger
-	registryStore        registry.Store
+	registryStore        registry.Store      // Legacy registry (fallback)
+	toolResolver         *ToolResolver       // New: tenant-scoped tool resolution
 	auditStore           audit.Store
 	schemaValidator      *registry.SchemaValidator
 	constraintsEvaluator *constraints.Evaluator
@@ -41,7 +43,9 @@ type Pipeline struct {
 type PipelineConfig struct {
 	Config        *config.Config
 	Logger        *zap.Logger
-	RegistryStore registry.Store
+	RegistryStore registry.Store           // Legacy registry (optional, for fallback)
+	DDBStore      *store.DynamoDBStore     // DynamoDB store for tenant-scoped tools
+	S3Client      *store.S3Client          // S3 client for tool manifests
 	AuditStore    audit.Store
 	// All LLM clients use RunPod endpoints
 	AlignmentClient *llm.Client // Intent alignment quorum
@@ -58,10 +62,17 @@ func NewPipeline(cfg PipelineConfig) *Pipeline {
 		}
 	}
 
+	// Create tool resolver if DynamoDB store is provided
+	var toolResolver *ToolResolver
+	if cfg.DDBStore != nil {
+		toolResolver = NewToolResolver(cfg.DDBStore, cfg.S3Client)
+	}
+
 	return &Pipeline{
 		cfg:                  cfg.Config,
 		logger:               cfg.Logger,
 		registryStore:        cfg.RegistryStore,
+		toolResolver:         toolResolver,
 		auditStore:           cfg.AuditStore,
 		schemaValidator:      registry.NewSchemaValidator(),
 		constraintsEvaluator: constraints.NewEvaluator(),
@@ -202,23 +213,50 @@ func (p *Pipeline) stepCanonicalize(ctx context.Context, state *PipelineState) e
 	return nil
 }
 
-// S1: Schema Validation & Tool Lookup
+// S1: Tool Resolution & Schema Validation
 func (p *Pipeline) stepSchemaValidation(ctx context.Context, state *PipelineState) error {
 	start := time.Now()
 	defer func() {
 		state.Timing.SchemaValidate = types.Duration(time.Since(start))
 	}()
 
-	// Look up tool in registry
-	tool, err := registry.ValidateToolExists(ctx, p.registryStore, state.Request.ToolCall)
-	if err != nil {
-		if err == registry.ErrToolNotFound {
-			return fmt.Errorf("tool not registered: %s", state.Request.ToolCall.ActionID)
+	var tool *types.ToolRegistryEntry
+
+	// Try new tenant-scoped resolution first
+	if p.toolResolver != nil && (state.Request.TenantID != "" || state.Request.OrgID != "") {
+		result, err := p.toolResolver.ResolveTool(ctx, state.Request)
+		if err != nil {
+			// Log but try legacy fallback
+			p.logger.Debug("tool resolver failed, trying legacy registry",
+				zap.Error(err),
+				zap.String("action_id", state.Request.ToolCall.ActionID),
+			)
+		} else if result != nil {
+			tool = ResolvedToolToRegistryEntry(result.Tool)
+			if result.ToolsetID != "" {
+				state.Reasons = append(state.Reasons, "resolved_via_toolset:"+result.ToolsetID)
+			}
 		}
-		if err == registry.ErrVersionMismatch {
-			return fmt.Errorf("version/schema hash mismatch for tool: %s", state.Request.ToolCall.ActionID)
+	}
+
+	// Fallback to legacy registry if new resolution didn't find the tool
+	if tool == nil && p.registryStore != nil {
+		var err error
+		tool, err = registry.ValidateToolExists(ctx, p.registryStore, state.Request.ToolCall)
+		if err != nil {
+			if err == registry.ErrToolNotFound {
+				return fmt.Errorf("tool not registered: %s", state.Request.ToolCall.ActionID)
+			}
+			if err == registry.ErrVersionMismatch {
+				return fmt.Errorf("version/schema hash mismatch for tool: %s", state.Request.ToolCall.ActionID)
+			}
+			return fmt.Errorf("registry lookup failed: %w", err)
 		}
-		return fmt.Errorf("registry lookup failed: %w", err)
+		state.Reasons = append(state.Reasons, "resolved_via_legacy_registry")
+	}
+
+	if tool == nil {
+		return fmt.Errorf("tool not found: %s", state.Request.ToolCall.ActionID)
 	}
 
 	state.Tool = tool
@@ -228,9 +266,11 @@ func (p *Pipeline) stepSchemaValidation(ctx context.Context, state *PipelineStat
 		state.Reasons = append(state.Reasons, "tool_deprecated")
 	}
 
-	// Validate args against schema
-	if err := p.schemaValidator.ValidateArgs(ctx, tool, state.Request.ToolCall.Args); err != nil {
-		return fmt.Errorf("schema validation failed: %w", err)
+	// Validate args against schema (only if schema is present)
+	if len(tool.Schema) > 0 {
+		if err := p.schemaValidator.ValidateArgs(ctx, tool, state.Request.ToolCall.Args); err != nil {
+			return fmt.Errorf("schema validation failed: %w", err)
+		}
 	}
 
 	return nil

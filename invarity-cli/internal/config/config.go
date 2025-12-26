@@ -137,24 +137,34 @@ func (c *Config) ValidateForPolicy() error {
 	return nil
 }
 
-// ValidateForTools checks if the configuration is valid for tool operations.
+// ValidateForTools checks if the configuration is valid for tenant-scoped tool operations.
+// Tools are registered to tenants (not principals). TenantID defaults to "default" if not set.
 func (c *Config) ValidateForTools() error {
 	if err := c.ValidateWithAuth(); err != nil {
 		return err
 	}
-	if c.PrincipalID == "" {
-		return fmt.Errorf("principal_id is required for tool operations (set via --principal, INVARITY_PRINCIPAL_ID, or config file)")
-	}
+	// Note: TenantID is optional - defaults to "default" if not set
 	return nil
 }
 
-// ValidateForToolsWithTenant checks if the configuration is valid for tenant-scoped tool operations.
-func (c *Config) ValidateForToolsWithTenant() error {
-	if err := c.ValidateForTools(); err != nil {
+// ValidateForToolsets checks if the configuration is valid for tenant-scoped toolset operations.
+// Toolsets are registered to tenants. TenantID defaults to "default" if not set.
+func (c *Config) ValidateForToolsets() error {
+	if err := c.ValidateWithAuth(); err != nil {
 		return err
 	}
-	if c.TenantID == "" {
-		return fmt.Errorf("tenant_id is required (set via --tenant, INVARITY_TENANT_ID, or config file)")
+	// Note: TenantID is optional - defaults to "default" if not set
+	return nil
+}
+
+// ValidateForPrincipal checks if the configuration is valid for principal-scoped operations.
+// Used for applying toolsets to principals.
+func (c *Config) ValidateForPrincipal() error {
+	if err := c.ValidateWithAuth(); err != nil {
+		return err
+	}
+	if c.PrincipalID == "" {
+		return fmt.Errorf("principal_id is required for principal operations (set via --principal, INVARITY_PRINCIPAL_ID, or config file)")
 	}
 	return nil
 }

@@ -125,7 +125,9 @@ type BoundedContext struct {
 // ToolCallRequest is the input to the firewall evaluation endpoint.
 type ToolCallRequest struct {
 	RequestID      string          `json:"request_id,omitempty"`
-	OrgID          string          `json:"org_id"`
+	OrgID          string          `json:"org_id"`               // Deprecated: use TenantID
+	TenantID       string          `json:"tenant_id,omitempty"`  // Tenant context
+	PrincipalID    string          `json:"principal_id,omitempty"` // Principal (agent) making the call
 	Actor          Actor           `json:"actor"`
 	Environment    Environment     `json:"env"`
 	UserIntent     string          `json:"user_intent"`

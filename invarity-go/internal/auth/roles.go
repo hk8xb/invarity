@@ -35,9 +35,13 @@ const (
 	ScopeTokensRead  Scope = "tokens:read"
 	ScopeTokensWrite Scope = "tokens:write"
 
-	// Tool/Toolset management scopes
+	// Tool management scopes
 	ScopeToolsRead  Scope = "tools:read"
 	ScopeToolsWrite Scope = "tools:write"
+
+	// Toolset management scopes
+	ScopeToolsetsRead  Scope = "toolsets:read"
+	ScopeToolsetsWrite Scope = "toolsets:write"
 
 	// Member management scopes
 	ScopeMembersRead  Scope = "members:read"
@@ -54,6 +58,7 @@ var RoleScopes = map[Role][]Scope{
 		ScopePrincipalsRead, ScopePrincipalsWrite,
 		ScopeTokensRead, ScopeTokensWrite,
 		ScopeToolsRead, ScopeToolsWrite,
+		ScopeToolsetsRead, ScopeToolsetsWrite,
 		ScopeMembersRead, ScopeMembersWrite,
 		ScopeAuditRead,
 	},
@@ -62,6 +67,7 @@ var RoleScopes = map[Role][]Scope{
 		ScopePrincipalsRead, ScopePrincipalsWrite,
 		ScopeTokensRead, ScopeTokensWrite,
 		ScopeToolsRead, ScopeToolsWrite,
+		ScopeToolsetsRead, ScopeToolsetsWrite,
 		ScopeMembersRead, ScopeMembersWrite,
 		ScopeAuditRead,
 	},
@@ -70,12 +76,14 @@ var RoleScopes = map[Role][]Scope{
 		ScopePrincipalsRead,
 		ScopeTokensRead,
 		ScopeToolsRead, ScopeToolsWrite,
+		ScopeToolsetsRead, ScopeToolsetsWrite,
 		ScopeAuditRead,
 	},
 	RoleViewer: {
 		ScopeTenantRead,
 		ScopePrincipalsRead,
 		ScopeToolsRead,
+		ScopeToolsetsRead,
 		ScopeAuditRead,
 	},
 }

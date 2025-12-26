@@ -29,6 +29,8 @@ type Config struct {
 	DDBTableMemberships string
 	DDBTablePrincipals  string
 	DDBTableTokens      string
+	DDBTableTools       string
+	DDBTableToolsets    string
 
 	// LLM endpoints
 	FunctionGemmaBaseURL string
@@ -71,6 +73,8 @@ func DefaultConfig() *Config {
 		DDBTableMemberships:  "invarity-memberships",
 		DDBTablePrincipals:   "invarity-principals",
 		DDBTableTokens:       "invarity-tokens",
+		DDBTableTools:        "invarity-tools",
+		DDBTableToolsets:     "invarity-toolsets",
 		FunctionGemmaBaseURL: "http://localhost:8001/v1",
 		FunctionGemmaAPIKey:  "",
 		LlamaGuardBaseURL:    "http://localhost:8002/v1",
@@ -227,6 +231,14 @@ func LoadFromEnv() (*Config, error) {
 
 	if v := os.Getenv("INVARITY_DDB_TABLE_TOKENS"); v != "" {
 		cfg.DDBTableTokens = v
+	}
+
+	if v := os.Getenv("INVARITY_DDB_TABLE_TOOLS"); v != "" {
+		cfg.DDBTableTools = v
+	}
+
+	if v := os.Getenv("INVARITY_DDB_TABLE_TOOLSETS"); v != "" {
+		cfg.DDBTableToolsets = v
 	}
 
 	// Control plane feature flag

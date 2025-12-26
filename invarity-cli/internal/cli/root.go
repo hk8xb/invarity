@@ -45,16 +45,18 @@ var RootCmd = &cobra.Command{
 	Short: "Invarity CLI - Control plane for agent tool execution",
 	Long: `Invarity CLI provides tools for managing and evaluating agent tool execution.
 
-It interfaces with the Invarity server to evaluate tool calls, register tools,
-and retrieve audit records.
+It interfaces with the Invarity server to evaluate tool calls, register tools
+and toolsets, and retrieve audit records.
+
+Ontology:
+  - Tools are registered to a tenant's tool library (not principals)
+  - Toolsets bundle tool references and are registered to a tenant
+  - Toolsets are applied to principals to grant access to tools
 
 Tool Registration:
-  Tools are registered to a principal-scoped registry. The "register" command
-  validates locally (including deterministic constraint checks), computes
-  schema_hash if missing, then stores in the registry.
-
-  All tool constraints are mandatory and deterministic - no inference.
-  Registration is scoped to a tenant and principal.
+  The "tools register" command validates locally (including deterministic
+  constraint checks), computes schema_hash if missing, then stores in the
+  tenant's tool registry.
 
 Configuration can be provided via:
   - Command-line flags (highest priority)
@@ -78,6 +80,7 @@ func init() {
 	RootCmd.AddCommand(simulateCmd)
 	RootCmd.AddCommand(toolsCmd)
 	RootCmd.AddCommand(toolsetsCmd)
+	RootCmd.AddCommand(principalsCmd)
 	RootCmd.AddCommand(auditCmd)
 	RootCmd.AddCommand(versionCmd)
 }

@@ -17,7 +17,10 @@ import (
 var toolsCmd = &cobra.Command{
 	Use:   "tools",
 	Short: "Manage tool manifests",
-	Long:  `Commands for validating and registering tool manifests.`,
+	Long: `Commands for validating and registering tool manifests.
+
+Tools are registered to a tenant's tool library and can be referenced by toolsets.
+Toolsets are then applied to principals.`,
 }
 
 var (
@@ -25,7 +28,6 @@ var (
 	toolsRegisterFile    string
 	toolsRegisterStdin   bool
 	toolsTenant          string
-	toolsPrincipal       string
 	toolsContinueOnError bool
 )
 
@@ -42,12 +44,12 @@ Supports both YAML and JSON formats. Returns a non-zero exit code if validation 
 
 var toolsRegisterCmd = &cobra.Command{
 	Use:   "register",
-	Short: "Register a tool with the registry",
+	Short: "Register a tool with the tenant's tool library",
 	Long: `Validates a tool manifest locally, computes schema_hash if missing, then registers
-with the Invarity registry.
+with the tenant's tool library in the Invarity registry.
 
-Registration is scoped to a tenant and principal. The tool is validated against
-the embedded JSON schema before any network calls are made.
+Tools are registered to a tenant (not a principal). Once registered, tools can be
+referenced by toolsets, which are then applied to principals.
 
 Schema Hash Computation:
   If the tool does not include invarity.schema_hash, the CLI computes it as:
@@ -57,14 +59,14 @@ Exit Codes:
   0 - Success
   1 - Validation failed (no network calls made)
   2 - Network/server error`,
-	Example: `  # Register a tool (requires --principal)
-  invarity tools register -f tool.yaml --principal my-agent
+	Example: `  # Register a tool to the tenant's library
+  invarity tools register -f tool.yaml
 
   # Register with explicit tenant
-  invarity tools register -f tool.yaml --tenant acme --principal my-agent
+  invarity tools register -f tool.yaml --tenant acme
 
   # JSON output for scripting
-  invarity tools register -f tool.json --principal my-agent --json`,
+  invarity tools register -f tool.json --json`,
 	RunE: runToolsRegister,
 }
 
@@ -84,28 +86,30 @@ Returns exit code 1 if any files are invalid.`,
 
 var toolsRegisterDirCmd = &cobra.Command{
 	Use:   "register-dir <directory>",
-	Short: "Register all tools in a directory",
-	Long: `Recursively finds and registers all tool manifests in a directory.
+	Short: "Register all tools in a directory to the tenant's library",
+	Long: `Recursively finds and registers all tool manifests in a directory
+to the tenant's tool library.
 
 Each file is validated locally before registration. By default, if any file
 fails validation, registration is aborted (no tools are registered).
 
 Use --continue-on-error to register valid tools even when some fail validation.
 
-Registration is scoped to a tenant and principal.
+Tools are registered to a tenant (not a principal). Once registered, tools can be
+referenced by toolsets, which are then applied to principals.
 
 Exit Codes:
   0 - All tools registered successfully
   1 - Validation failed (at least one invalid file)
   2 - Network/server error`,
 	Example: `  # Register all tools in a directory
-  invarity tools register-dir ./tools --principal my-agent
+  invarity tools register-dir ./tools
 
   # Continue even if some files are invalid
-  invarity tools register-dir ./tools --principal my-agent --continue-on-error
+  invarity tools register-dir ./tools --continue-on-error
 
   # With explicit tenant
-  invarity tools register-dir ./tools --tenant acme --principal my-agent`,
+  invarity tools register-dir ./tools --tenant acme`,
 	Args: cobra.ExactArgs(1),
 	RunE: runToolsRegisterDir,
 }
@@ -115,16 +119,14 @@ func init() {
 	toolsValidateCmd.Flags().StringVarP(&toolsValidateFile, "file", "f", "", "Path to tool manifest file (required)")
 	toolsValidateCmd.MarkFlagRequired("file")
 
-	// Register command
+	// Register command - tools are registered to tenant (not principal)
 	toolsRegisterCmd.Flags().StringVarP(&toolsRegisterFile, "file", "f", "", "Path to tool manifest file")
 	toolsRegisterCmd.Flags().BoolVar(&toolsRegisterStdin, "stdin", false, "Read tool manifest from stdin")
-	toolsRegisterCmd.Flags().StringVar(&toolsTenant, "tenant", "", "Tenant ID (uses config default if not specified)")
-	toolsRegisterCmd.Flags().StringVar(&toolsPrincipal, "principal", "", "Principal ID (required unless config default is set)")
+	toolsRegisterCmd.Flags().StringVar(&toolsTenant, "tenant", "", "Tenant ID (uses config default, or 'default' if not specified)")
 
-	// Register-dir command
+	// Register-dir command - tools are registered to tenant (not principal)
 	toolsRegisterDirCmd.Flags().BoolVar(&toolsContinueOnError, "continue-on-error", false, "Continue registering after validation failures")
-	toolsRegisterDirCmd.Flags().StringVar(&toolsTenant, "tenant", "", "Tenant ID (uses config default if not specified)")
-	toolsRegisterDirCmd.Flags().StringVar(&toolsPrincipal, "principal", "", "Principal ID (required unless config default is set)")
+	toolsRegisterDirCmd.Flags().StringVar(&toolsTenant, "tenant", "", "Tenant ID (uses config default, or 'default' if not specified)")
 
 	// Add subcommands
 	toolsCmd.AddCommand(toolsValidateCmd)
@@ -213,11 +215,8 @@ func runToolsRegister(cmd *cobra.Command, args []string) error {
 	if toolsTenant != "" {
 		cfg.TenantID = toolsTenant
 	}
-	if toolsPrincipal != "" {
-		cfg.PrincipalID = toolsPrincipal
-	}
 
-	// Validate configuration
+	// Validate configuration (tools don't require principal)
 	if err := cfg.ValidateForTools(); err != nil {
 		return err
 	}
@@ -303,10 +302,10 @@ func runToolsRegister(cmd *cobra.Command, args []string) error {
 		tenantID = "default"
 	}
 
-	regResp, rawJSON, err := c.RegisterToolScoped(ctx, tenantID, cfg.PrincipalID, tool)
+	regResp, rawJSON, err := c.RegisterToolScoped(ctx, tenantID, tool)
 	if err != nil {
 		if client.IsNotSupportedError(err) {
-			printWarn("Server does not support principal-scoped tool registration yet.")
+			printWarn("Server does not support tenant-scoped tool registration yet.")
 			printInfo("The tool manifest is valid and ready to be registered when the server supports it.")
 			os.Exit(ExitNetworkError)
 		}
@@ -486,11 +485,8 @@ func runToolsRegisterDir(cmd *cobra.Command, args []string) error {
 	if toolsTenant != "" {
 		cfg.TenantID = toolsTenant
 	}
-	if toolsPrincipal != "" {
-		cfg.PrincipalID = toolsPrincipal
-	}
 
-	// Validate configuration
+	// Validate configuration (tools don't require principal)
 	if err := cfg.ValidateForTools(); err != nil {
 		return err
 	}
@@ -612,7 +608,7 @@ func runToolsRegisterDir(cmd *cobra.Command, args []string) error {
 			mu.Lock()
 			if serverNotSupported {
 				mu.Unlock()
-				result.Error = "server does not support principal-scoped tool registration"
+				result.Error = "server does not support tenant-scoped tool registration"
 				results[idx] = result
 				return
 			}
@@ -637,7 +633,7 @@ func runToolsRegisterDir(cmd *cobra.Command, args []string) error {
 			ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
 			defer cancel()
 
-			regResp, _, err := c.RegisterToolScoped(ctx, tenantID, cfg.PrincipalID, tool)
+			regResp, _, err := c.RegisterToolScoped(ctx, tenantID, tool)
 			if err != nil {
 				if client.IsNotSupportedError(err) {
 					mu.Lock()
@@ -679,7 +675,6 @@ func runToolsRegisterDir(cmd *cobra.Command, args []string) error {
 			"failed":        failureCount,
 			"skipped":       len(invalidFiles),
 			"tenant_id":     tenantID,
-			"principal_id":  cfg.PrincipalID,
 			"results":       results,
 			"invalid_files": invalidDetails,
 		}
@@ -693,7 +688,7 @@ func runToolsRegisterDir(cmd *cobra.Command, args []string) error {
 
 	// Human-readable output
 	if serverNotSupported {
-		printWarn("Server does not support principal-scoped tool registration yet.")
+		printWarn("Server does not support tenant-scoped tool registration yet.")
 		printInfo("All %d tool manifests are valid and ready to be registered when the server supports it.", len(validFiles))
 		os.Exit(ExitNetworkError)
 	}
@@ -701,7 +696,6 @@ func runToolsRegisterDir(cmd *cobra.Command, args []string) error {
 	printSection("Registration Summary")
 	printKeyValue("Directory", dir)
 	printKeyValue("Tenant", tenantID)
-	printKeyValue("Principal", cfg.PrincipalID)
 	printKeyValue("Total Files", fmt.Sprintf("%d", len(files)))
 	printKeyValue("Validated", fmt.Sprintf("%d", len(validFiles)))
 	if len(invalidFiles) > 0 {

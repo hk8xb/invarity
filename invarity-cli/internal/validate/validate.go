@@ -431,6 +431,8 @@ func FindToolFiles(dir string) ([]string, error) {
 // Toolset represents a parsed toolset.
 type Toolset struct {
 	ToolsetID   string            `json:"toolset_id"`
+	Revision    string            `json:"revision,omitempty"`
+	DisplayName string            `json:"display_name,omitempty"`
 	Description string            `json:"description,omitempty"`
 	Envs        []string          `json:"envs,omitempty"`
 	Status      string            `json:"status,omitempty"`
@@ -458,6 +460,12 @@ func ParseToolsetWithMetadata(filePath string) (*Toolset, error) {
 	if id, ok := data["toolset_id"].(string); ok {
 		toolset.ToolsetID = id
 	}
+	if rev, ok := data["revision"].(string); ok {
+		toolset.Revision = rev
+	}
+	if displayName, ok := data["display_name"].(string); ok {
+		toolset.DisplayName = displayName
+	}
 	if desc, ok := data["description"].(string); ok {
 		toolset.Description = desc
 	}
@@ -477,7 +485,10 @@ func ParseToolsetWithMetadata(filePath string) (*Toolset, error) {
 		for _, t := range tools {
 			if tm, ok := t.(map[string]interface{}); ok {
 				ref := ToolRef{}
-				if id, ok := tm["id"].(string); ok {
+				// Support both "tool_id" (new schema) and "id" (old schema)
+				if id, ok := tm["tool_id"].(string); ok {
+					ref.ID = id
+				} else if id, ok := tm["id"].(string); ok {
 					ref.ID = id
 				}
 				if ver, ok := tm["version"].(string); ok {

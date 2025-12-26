@@ -2,6 +2,16 @@
 
 Command-line interface for the Invarity control plane - a firewall for agent tool execution.
 
+## Concepts
+
+The Invarity CLI follows a clear ontology:
+
+- **Tools** are registered to a **tenant's tool library** (not to principals)
+- **Toolsets** bundle tool references and are registered to a **tenant's toolset library**
+- **Toolsets are applied to principals** to grant access to specific tools
+
+This separation allows tools to be defined once and reused across multiple toolsets and principals.
+
 ## Installation
 
 ### From Source
@@ -28,10 +38,10 @@ go build -ldflags "-X main.version=1.0.0" -o invarity ./cmd/invarity
 
 The CLI uses configuration from multiple sources with the following precedence (highest to lowest):
 
-1. **Command-line flags** - `--server`, `--api-key`, `--tenant`, `--principal`, `--org`, `--env`
-2. **Environment variables** - `INVARITY_SERVER`, `INVARITY_API_KEY`, `INVARITY_TENANT_ID`, `INVARITY_PRINCIPAL_ID`, `INVARITY_ORG_ID`, `INVARITY_ENV`, `INVARITY_TOOLSET_ID`
+1. **Command-line flags** - `--server`, `--api-key`, `--tenant`, `--principal`
+2. **Environment variables** - `INVARITY_SERVER`, `INVARITY_API_KEY`, `INVARITY_TENANT_ID`, `INVARITY_PRINCIPAL_ID`
 3. **Config file** - `~/.invarity/config.yaml`
-4. **Defaults** - `http://localhost:8080`, env=`sandbox`
+4. **Defaults** - `http://localhost:8080`, tenant=`default`
 
 ### Config File
 
@@ -40,12 +50,8 @@ Create `~/.invarity/config.yaml`:
 ```yaml
 server: https://api.invarity.dev
 api_key: your-api-key-here
-tenant_id: acme              # Default tenant for tool registration
-principal_id: my-agent       # Default principal for tool registration
-org_id: org_abc123
-env: sandbox                 # sandbox, staging, or prod
-project_id: proj_xyz         # optional
-toolset_id: payments-v1      # optional default toolset
+tenant_id: acme              # Default tenant for tool/toolset registration
+principal_id: my-agent       # Default principal for applying toolsets
 ```
 
 ### Environment Variables
@@ -55,10 +61,6 @@ export INVARITY_SERVER=https://api.invarity.dev
 export INVARITY_API_KEY=your-api-key-here
 export INVARITY_TENANT_ID=acme
 export INVARITY_PRINCIPAL_ID=my-agent
-export INVARITY_ORG_ID=org_abc123
-export INVARITY_ENV=sandbox
-export INVARITY_PROJECT_ID=proj_xyz    # optional
-export INVARITY_TOOLSET_ID=payments-v1 # optional
 ```
 
 ## Recommended Workflow
@@ -67,14 +69,16 @@ The typical workflow for setting up an agent with Invarity:
 
 ```bash
 # 1. Set up configuration
-export INVARITY_PRINCIPAL_ID=my-agent
 export INVARITY_TENANT_ID=acme  # optional, defaults to "default"
 
-# 2. Register tools from a directory
-invarity tools register-dir ./tools --principal my-agent
+# 2. Register tools to the tenant's library
+invarity tools register-dir ./tools
 
-# 3. Apply a toolset with auto-registration of referenced tools
-invarity toolsets apply -f toolset.yaml --principal my-agent --tools-dir ./tools
+# 3. Register a toolset to the tenant's library
+invarity toolsets register -f toolset.yaml --tools-dir ./tools
+
+# 4. Apply the toolset to a principal
+invarity principals apply-toolset --principal my-agent --toolset payments-v1 --revision 1.0.0
 ```
 
 ## Commands
@@ -85,8 +89,8 @@ invarity toolsets apply -f toolset.yaml --principal my-agent --tools-dir ./tools
 |------|-------------|
 | `--server` | Invarity server URL |
 | `--api-key` | API key for authentication |
-| `--tenant` | Tenant ID for tool/toolset operations |
-| `--principal` | Principal ID for tool/toolset operations |
+| `--tenant` | Tenant ID for operations |
+| `--principal` | Principal ID (for principal operations) |
 | `--trace` | Print HTTP request/response metadata (for debugging) |
 | `--json` | Output raw JSON response (for scripting) |
 
@@ -102,7 +106,7 @@ invarity toolsets apply -f toolset.yaml --principal my-agent --tools-dir ./tools
 
 ## Tool Registration
 
-**Key Concept:** "Register" means validate locally, compute schema_hash if missing, then POST to the registry. Tools are scoped to a tenant and principal.
+Tools are registered to a **tenant's tool library**. Once registered, tools can be referenced by toolsets.
 
 ### `invarity tools validate`
 
@@ -121,33 +125,32 @@ invarity tools validate -f tool.yaml --json
 
 ### `invarity tools register`
 
-Register a tool with the principal-scoped registry.
+Register a tool with the tenant's tool library.
 
 ```bash
-# Register a tool (requires --principal)
-invarity tools register -f tool.yaml --principal my-agent
+# Register a tool
+invarity tools register -f tool.yaml
 
 # Register with explicit tenant
-invarity tools register -f tool.yaml --tenant acme --principal my-agent
+invarity tools register -f tool.yaml --tenant acme
 
 # Read from stdin
-cat tool.json | invarity tools register --stdin --principal my-agent
+cat tool.json | invarity tools register --stdin
 
 # JSON output
-invarity tools register -f tool.json --principal my-agent --json
+invarity tools register -f tool.json --json
 ```
 
 **What happens during registration:**
 1. Validates the tool manifest against the embedded JSON schema
-2. Normalizes enum values to lowercase (operation, side_effect_scope, etc.)
+2. Normalizes enum values to lowercase (operation, base_risk, etc.)
 3. Computes `schema_hash` if not present: `sha256:<hex of canonicalized invarity block>`
-4. POSTs to `/v1/tenants/{tenant}/principals/{principal}/tools`
+4. POSTs to `/v1/tenants/{tenant}/tools`
 
 **Response includes:**
 - `tool_id` - Unique identifier for the registered tool
 - `version` - Semantic version
 - `schema_hash` - SHA256 hash of the tool schema
-- `stored` - Whether the tool was stored successfully
 
 ### `invarity tools validate-dir`
 
@@ -165,20 +168,20 @@ Scans for `*.yaml`, `*.yml`, and `*.json` files containing tool definitions.
 
 ### `invarity tools register-dir`
 
-Register all tools in a directory with the registry.
+Register all tools in a directory with the tenant's library.
 
 ```bash
-# Register all tools in a directory (requires --principal)
-invarity tools register-dir ./tools --principal my-agent
+# Register all tools in a directory
+invarity tools register-dir ./tools
 
 # With explicit tenant
-invarity tools register-dir ./tools --tenant acme --principal my-agent
+invarity tools register-dir ./tools --tenant acme
 
 # Continue on validation errors (register valid tools only)
-invarity tools register-dir ./tools --principal my-agent --continue-on-error
+invarity tools register-dir ./tools --continue-on-error
 
 # JSON output
-invarity tools register-dir ./tools --principal my-agent --json
+invarity tools register-dir ./tools --json
 ```
 
 **Behavior:**
@@ -191,7 +194,7 @@ invarity tools register-dir ./tools --principal my-agent --json
 
 ## Toolset Management
 
-Toolsets group related tools together with environment bindings and optional policy references. Toolsets reference tools that must be registered in the principal-scoped registry.
+Toolsets bundle tool references and are registered to a **tenant's toolset library**. Tools referenced by a toolset must exist in the tenant's tool registry.
 
 ### `invarity toolsets validate`
 
@@ -205,32 +208,28 @@ invarity toolsets validate -f toolset.yaml
 invarity toolsets validate -f toolset.json --json
 ```
 
-### `invarity toolsets apply`
+### `invarity toolsets register`
 
-Apply a toolset to the principal-scoped registry.
+Register a toolset with the tenant's toolset library.
 
 ```bash
-# Apply a toolset (requires --principal)
-invarity toolsets apply -f toolset.yaml --principal my-agent
+# Register a toolset
+invarity toolsets register -f toolset.yaml
 
-# Apply with auto-registration of referenced tools
-invarity toolsets apply -f toolset.yaml --principal my-agent --tools-dir ./tools
-
-# Override environment and status
-invarity toolsets apply -f toolset.yaml --principal my-agent --env prod --status ACTIVE
+# Register with auto-registration of referenced tools
+invarity toolsets register -f toolset.yaml --tools-dir ./tools
 
 # With explicit tenant
-invarity toolsets apply -f toolset.yaml --tenant acme --principal my-agent
+invarity toolsets register -f toolset.yaml --tenant acme
 
 # JSON output
-invarity toolsets apply -f toolset.yaml --principal my-agent --json
+invarity toolsets register -f toolset.yaml --json
 ```
 
 **When `--tools-dir` is provided:**
-1. Scans the directory for tool manifests
-2. Verifies all tools referenced in the toolset exist in the directory
-3. Automatically registers the referenced tools before applying the toolset
-4. Only registers tools that are referenced by the toolset (not all tools in the directory)
+1. Verifies all tools referenced in the toolset exist in the directory
+2. Automatically registers the referenced tools before registering the toolset
+3. Only registers tools that are referenced by the toolset (not all tools in the directory)
 
 ### `invarity toolsets lint`
 
@@ -245,11 +244,37 @@ invarity toolsets lint -f toolset.yaml --tools-dir ./tools --json
 ```
 
 **Lint checks:**
-- All tool references (`id@version`) exist in the tools directory
+- All tool references (`tool_id@version`) exist in the tools directory
 - Reports missing tools (errors)
 - Reports unreferenced tools (warnings)
 - Reports invalid tool files that couldn't be parsed
 - Reports tools missing `invarity.id` or `invarity.version`
+
+---
+
+## Principal Management
+
+Principals are the agents or services that use toolsets. Toolsets are applied to principals to grant access to specific tools.
+
+### `invarity principals apply-toolset`
+
+Apply a registered toolset to a principal.
+
+```bash
+# Apply a toolset to a principal
+invarity principals apply-toolset --principal my-agent --toolset payments-v1 --revision 1.0.0
+
+# With explicit tenant
+invarity principals apply-toolset --tenant acme --principal my-agent --toolset payments-v1 --revision 1.0.0
+
+# JSON output
+invarity principals apply-toolset --principal my-agent --toolset payments-v1 --revision 1.0.0 --json
+```
+
+**Required flags:**
+- `--principal` - Principal ID to apply the toolset to
+- `--toolset` - Toolset ID to apply
+- `--revision` - Toolset revision to apply
 
 ---
 
@@ -439,24 +464,22 @@ The CLI performs additional lint checks beyond schema validation:
 
 ## Toolset Schema
 
-Toolsets group related tools together with environment bindings. See [examples/toolset.payments.yaml](examples/toolset.payments.yaml) for a complete example.
+Toolsets bundle tool references and are registered to a tenant. They can then be applied to principals. See [examples/toolset.payments.yaml](examples/toolset.payments.yaml) for a complete example.
 
 ### Required Fields
 
 ```yaml
 toolset_id: my-toolset-v1   # Unique identifier (1-128 chars)
+revision: "1.0.0"           # Immutable revision identifier
 
-tools:                       # Tool references (1-5000 items)
-  - id: stripe.refund_payment
+tools:                       # Tool references (1-500 items)
+  - tool_id: stripe.refund_payment
     version: 1.0.0
-  - id: database.query
+  - tool_id: database.query
     version: 1.0.0
 
 # Optional fields
-envs:                        # Environments where toolset is available
-  - sandbox
-  - prod
-status: ACTIVE               # DRAFT, ACTIVE, DEPRECATED
+display_name: My Toolset     # Human-friendly name
 description: What this toolset is for
 labels:
   team: payments
@@ -465,41 +488,44 @@ labels:
 
 ## Examples
 
-### Complete Tool Registration Workflow
+### Complete Registration Workflow
 
 ```bash
 # 1. Validate tools locally
 invarity tools validate-dir ./tools
 
-# 2. Register all tools
-invarity tools register-dir ./tools --principal my-agent
+# 2. Register all tools to the tenant's library
+invarity tools register-dir ./tools
 
 # 3. Lint toolset against tools
 invarity toolsets lint -f toolset.yaml --tools-dir ./tools
 
-# 4. Apply toolset (will verify tools are registered)
-invarity toolsets apply -f toolset.yaml --principal my-agent
+# 4. Register toolset to the tenant's library
+invarity toolsets register -f toolset.yaml
+
+# 5. Apply toolset to a principal
+invarity principals apply-toolset --principal my-agent --toolset payments-v1 --revision 1.0.0
 ```
 
-### One-Step Toolset Deployment
+### One-Step Toolset Registration
 
 ```bash
-# Register referenced tools and apply toolset in one command
-invarity toolsets apply -f toolset.yaml --principal my-agent --tools-dir ./tools
+# Register tools and toolset in one command
+invarity toolsets register -f toolset.yaml --tools-dir ./tools
 ```
 
 ### Scripting with JSON Output
 
 ```bash
 # Get registration result as JSON
-RESULT=$(invarity tools register -f tool.yaml --principal my-agent --json)
+RESULT=$(invarity tools register -f tool.yaml --json)
 TOOL_ID=$(echo "$RESULT" | jq -r '.tool_id')
 SCHEMA_HASH=$(echo "$RESULT" | jq -r '.schema_hash')
 
 echo "Registered tool: $TOOL_ID with hash: $SCHEMA_HASH"
 ```
 
-### CI/CD Tool Validation
+### CI/CD Validation
 
 ```bash
 #!/bin/bash
@@ -507,6 +533,9 @@ set -e
 
 # Validate all tool manifests in a directory
 invarity tools validate-dir ./tools
+
+# Validate toolset
+invarity toolsets validate -f toolset.yaml
 
 # Lint toolset against tools
 invarity toolsets lint -f toolset.yaml --tools-dir ./tools
@@ -529,6 +558,7 @@ invarity-cli/
 │   │   ├── simulate.go
 │   │   ├── tools.go
 │   │   ├── toolsets.go
+│   │   ├── principals.go
 │   │   ├── audit.go
 │   │   └── version.go
 │   ├── client/            # HTTP client

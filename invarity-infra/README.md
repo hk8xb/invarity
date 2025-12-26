@@ -10,7 +10,7 @@ This stack provisions:
 - **Load Balancing**: Public ALB on HTTP :80
 - **Compute**: ECS Fargate cluster and service
 - **Container Registry**: ECR repository for firewall service image
-- **Data Storage**: 9 DynamoDB tables with multi-tenant keying, 2 S3 buckets
+- **Data Storage**: 8 DynamoDB tables with multi-tenant keying, 2 S3 buckets
 - **Identity**: Cognito User Pool for human authentication, identity DynamoDB tables
 - **Security**: KMS key for encryption, Secrets Manager for API key salt
 - **Configuration**: SSM Parameter Store for service discovery
@@ -26,10 +26,9 @@ All data storage is designed for tenant isolation:
 | Table | Partition Key | Sort Key | GSIs | Purpose |
 |-------|--------------|----------|------|---------|
 | `tenants` | `tenant_id` | - | - | Tenant configuration, includes `default_kms_key_arn` for future per-tenant encryption |
-| `principals` | `tenant_id` | `principal_id` | - | API principals (agents/services) per tenant |
-| `tools` | `tenant_id#principal_id` | `tool_key` (`<tool_id>#<version>`) | - | Tool definitions |
-| `toolsets` | `tenant_id#principal_id` | `toolset_id` | - | Toolset configurations |
-| `toolset-revisions` | `tenant_id#principal_id` | `<toolset_id>#<revision>` | - | Toolset version history |
+| `principals` | `tenant_id` | `principal_id` | - | API principals (agents/services) per tenant, references active `toolset_id#revision` |
+| `tools` | `tenant_id` | `tool_version` (`<tool_id>#<version>`) | `tool-versions-index` | Tenant-scoped tool definitions (immutable versions) |
+| `toolsets` | `tenant_id` | `toolset_revision` (`<toolset_id>#<revision>`) | `toolset-revisions-index` | Tenant-scoped toolset configurations (immutable revisions) |
 | `audit-index` | `tenant_id` | `created_at#audit_id` | `principal-index` | Audit log index |
 
 #### Identity Tables
@@ -79,7 +78,8 @@ All data storage is designed for tenant isolation:
 
 | Bucket | Prefix Convention | Example Path |
 |--------|------------------|--------------|
-| `manifests` | `manifests/<tenant_id>/...` | `manifests/tenant-123/tools/tool-abc.json` |
+| `manifests` | `manifests/<tenant_id>/tools/<tool_id>/<version>.json` | `manifests/tenant-123/tools/tool-abc/v1.json` |
+| `manifests` | `manifests/<tenant_id>/toolsets/<toolset_id>/<revision>.json` | `manifests/tenant-123/toolsets/toolset-xyz/r3.json` |
 | `audit-blobs` | `audit/<tenant_id>/YYYY/MM/DD/<audit_id>.json` | `audit/tenant-123/2024/01/15/audit-xyz.json` |
 
 ### Future Enterprise Upgrade Path
@@ -203,7 +203,6 @@ The ECS task definition injects these environment variables into your container:
 | `PRINCIPALS_TABLE` | DynamoDB principals table name |
 | `TOOLS_TABLE` | DynamoDB tools table name |
 | `TOOLSETS_TABLE` | DynamoDB toolsets table name |
-| `TOOLSET_REVISIONS_TABLE` | DynamoDB toolset revisions table name |
 | `AUDIT_INDEX_TABLE` | DynamoDB audit index table name |
 | `USERS_TABLE` | DynamoDB users table name |
 | `TENANT_MEMBERSHIPS_TABLE` | DynamoDB tenant memberships table name |
@@ -235,7 +234,6 @@ All configuration is stored in SSM Parameter Store under `/invarity/<env>/`:
 /invarity/dev/dynamodb/principals_table
 /invarity/dev/dynamodb/tools_table
 /invarity/dev/dynamodb/toolsets_table
-/invarity/dev/dynamodb/toolset_revisions_table
 /invarity/dev/dynamodb/audit_index_table
 
 # Identity DynamoDB tables
