@@ -13,7 +13,7 @@
   "ecs": {
     "cpu": 256,
     "memoryMiB": 512,
-    "desiredCount": 1,
+    "desiredCount": 0,
     "healthCheckPath": "/healthz",
     "containerPort": 8080
   },
