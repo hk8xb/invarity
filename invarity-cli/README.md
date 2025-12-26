@@ -28,8 +28,8 @@ go build -ldflags "-X main.version=1.0.0" -o invarity ./cmd/invarity
 
 The CLI uses configuration from multiple sources with the following precedence (highest to lowest):
 
-1. **Command-line flags** - `--server`, `--api-key`, `--org`, `--env`
-2. **Environment variables** - `INVARITY_SERVER`, `INVARITY_API_KEY`, `INVARITY_ORG_ID`, `INVARITY_ENV`, `INVARITY_TOOLSET_ID`
+1. **Command-line flags** - `--server`, `--api-key`, `--tenant`, `--principal`, `--org`, `--env`
+2. **Environment variables** - `INVARITY_SERVER`, `INVARITY_API_KEY`, `INVARITY_TENANT_ID`, `INVARITY_PRINCIPAL_ID`, `INVARITY_ORG_ID`, `INVARITY_ENV`, `INVARITY_TOOLSET_ID`
 3. **Config file** - `~/.invarity/config.yaml`
 4. **Defaults** - `http://localhost:8080`, env=`sandbox`
 
@@ -40,10 +40,12 @@ Create `~/.invarity/config.yaml`:
 ```yaml
 server: https://api.invarity.dev
 api_key: your-api-key-here
+tenant_id: acme              # Default tenant for tool registration
+principal_id: my-agent       # Default principal for tool registration
 org_id: org_abc123
-env: sandbox          # sandbox, staging, or prod
-project_id: proj_xyz  # optional
-toolset_id: payments-v1  # optional default toolset
+env: sandbox                 # sandbox, staging, or prod
+project_id: proj_xyz         # optional
+toolset_id: payments-v1      # optional default toolset
 ```
 
 ### Environment Variables
@@ -51,10 +53,28 @@ toolset_id: payments-v1  # optional default toolset
 ```bash
 export INVARITY_SERVER=https://api.invarity.dev
 export INVARITY_API_KEY=your-api-key-here
+export INVARITY_TENANT_ID=acme
+export INVARITY_PRINCIPAL_ID=my-agent
 export INVARITY_ORG_ID=org_abc123
 export INVARITY_ENV=sandbox
-export INVARITY_PROJECT_ID=proj_xyz  # optional
-export INVARITY_TOOLSET_ID=payments-v1  # optional
+export INVARITY_PROJECT_ID=proj_xyz    # optional
+export INVARITY_TOOLSET_ID=payments-v1 # optional
+```
+
+## Recommended Workflow
+
+The typical workflow for setting up an agent with Invarity:
+
+```bash
+# 1. Set up configuration
+export INVARITY_PRINCIPAL_ID=my-agent
+export INVARITY_TENANT_ID=acme  # optional, defaults to "default"
+
+# 2. Register tools from a directory
+invarity tools register-dir ./tools --principal my-agent
+
+# 3. Apply a toolset with auto-registration of referenced tools
+invarity toolsets apply -f toolset.yaml --principal my-agent --tools-dir ./tools
 ```
 
 ## Commands
@@ -65,8 +85,175 @@ export INVARITY_TOOLSET_ID=payments-v1  # optional
 |------|-------------|
 | `--server` | Invarity server URL |
 | `--api-key` | API key for authentication |
+| `--tenant` | Tenant ID for tool/toolset operations |
+| `--principal` | Principal ID for tool/toolset operations |
 | `--trace` | Print HTTP request/response metadata (for debugging) |
 | `--json` | Output raw JSON response (for scripting) |
+
+### Exit Codes
+
+| Code | Meaning |
+|------|---------|
+| `0` | Success |
+| `1` | Validation error (invalid input, schema violation) |
+| `2` | Network/server error (connection failed, server error) |
+
+---
+
+## Tool Registration
+
+**Key Concept:** "Register" means validate locally, compute schema_hash if missing, then POST to the registry. Tools are scoped to a tenant and principal.
+
+### `invarity tools validate`
+
+Validate a tool manifest against the Invarity schema.
+
+```bash
+# Validate YAML
+invarity tools validate -f tool.yaml
+
+# Validate JSON
+invarity tools validate -f tool.json
+
+# JSON output
+invarity tools validate -f tool.yaml --json
+```
+
+### `invarity tools register`
+
+Register a tool with the principal-scoped registry.
+
+```bash
+# Register a tool (requires --principal)
+invarity tools register -f tool.yaml --principal my-agent
+
+# Register with explicit tenant
+invarity tools register -f tool.yaml --tenant acme --principal my-agent
+
+# Read from stdin
+cat tool.json | invarity tools register --stdin --principal my-agent
+
+# JSON output
+invarity tools register -f tool.json --principal my-agent --json
+```
+
+**What happens during registration:**
+1. Validates the tool manifest against the embedded JSON schema
+2. Normalizes enum values to lowercase (operation, side_effect_scope, etc.)
+3. Computes `schema_hash` if not present: `sha256:<hex of canonicalized invarity block>`
+4. POSTs to `/v1/tenants/{tenant}/principals/{principal}/tools`
+
+**Response includes:**
+- `tool_id` - Unique identifier for the registered tool
+- `version` - Semantic version
+- `schema_hash` - SHA256 hash of the tool schema
+- `stored` - Whether the tool was stored successfully
+
+### `invarity tools validate-dir`
+
+Validate all tool manifests in a directory recursively.
+
+```bash
+# Validate all tools in a directory
+invarity tools validate-dir ./tools
+
+# JSON output with per-file results
+invarity tools validate-dir ./tools --json
+```
+
+Scans for `*.yaml`, `*.yml`, and `*.json` files containing tool definitions.
+
+### `invarity tools register-dir`
+
+Register all tools in a directory with the registry.
+
+```bash
+# Register all tools in a directory (requires --principal)
+invarity tools register-dir ./tools --principal my-agent
+
+# With explicit tenant
+invarity tools register-dir ./tools --tenant acme --principal my-agent
+
+# Continue on validation errors (register valid tools only)
+invarity tools register-dir ./tools --principal my-agent --continue-on-error
+
+# JSON output
+invarity tools register-dir ./tools --principal my-agent --json
+```
+
+**Behavior:**
+- Validates all files locally first
+- By default, aborts if any file fails validation (no partial registration)
+- Use `--continue-on-error` to register valid tools and report failures
+- Up to 4 tools are registered concurrently for performance
+
+---
+
+## Toolset Management
+
+Toolsets group related tools together with environment bindings and optional policy references. Toolsets reference tools that must be registered in the principal-scoped registry.
+
+### `invarity toolsets validate`
+
+Validate a toolset manifest against the Invarity Toolset Schema.
+
+```bash
+# Validate a toolset
+invarity toolsets validate -f toolset.yaml
+
+# JSON output
+invarity toolsets validate -f toolset.json --json
+```
+
+### `invarity toolsets apply`
+
+Apply a toolset to the principal-scoped registry.
+
+```bash
+# Apply a toolset (requires --principal)
+invarity toolsets apply -f toolset.yaml --principal my-agent
+
+# Apply with auto-registration of referenced tools
+invarity toolsets apply -f toolset.yaml --principal my-agent --tools-dir ./tools
+
+# Override environment and status
+invarity toolsets apply -f toolset.yaml --principal my-agent --env prod --status ACTIVE
+
+# With explicit tenant
+invarity toolsets apply -f toolset.yaml --tenant acme --principal my-agent
+
+# JSON output
+invarity toolsets apply -f toolset.yaml --principal my-agent --json
+```
+
+**When `--tools-dir` is provided:**
+1. Scans the directory for tool manifests
+2. Verifies all tools referenced in the toolset exist in the directory
+3. Automatically registers the referenced tools before applying the toolset
+4. Only registers tools that are referenced by the toolset (not all tools in the directory)
+
+### `invarity toolsets lint`
+
+Lint a toolset against a tools directory to verify all tool references exist.
+
+```bash
+# Lint toolset against tools directory
+invarity toolsets lint -f toolset.yaml --tools-dir ./tools
+
+# JSON output
+invarity toolsets lint -f toolset.yaml --tools-dir ./tools --json
+```
+
+**Lint checks:**
+- All tool references (`id@version`) exist in the tools directory
+- Reports missing tools (errors)
+- Reports unreferenced tools (warnings)
+- Reports invalid tool files that couldn't be parsed
+- Reports tools missing `invarity.id` or `invarity.version`
+
+---
+
+## Utility Commands
 
 ### `invarity ping`
 
@@ -119,121 +306,26 @@ invarity simulate -f request.json --trace
 }
 ```
 
-### `invarity tools validate`
+### `invarity audit show`
 
-Validate a tool manifest against the Invarity schema.
+Retrieve an audit record by ID.
 
 ```bash
-# Validate YAML
-invarity tools validate -f tool.yaml
-
-# Validate JSON
-invarity tools validate -f tool.json
+# Show audit record
+invarity audit show abc123
 
 # JSON output
-invarity tools validate -f tool.yaml --json
+invarity audit show abc123 --json
 ```
 
-**Exit codes:**
-- `0` - Valid manifest
-- `1` - Validation errors
+### `invarity version`
 
-### `invarity tools register`
-
-Register a tool with the server.
+Display version information.
 
 ```bash
-# Register a tool
-invarity tools register -f tool.yaml --api-key YOUR_KEY
-
-# JSON output
-invarity tools register -f tool.json --json
+invarity version
+invarity version --json
 ```
-
-The manifest is validated locally before being sent to the server.
-
-### `invarity tools validate-dir`
-
-Validate all tool manifests in a directory recursively.
-
-```bash
-# Validate all tools in a directory
-invarity tools validate-dir ./tools
-
-# JSON output with per-file results
-invarity tools validate-dir ./tools --json
-```
-
-Scans for `*.yaml`, `*.yml`, and `*.json` files containing tool definitions.
-
-### `invarity tools register-dir`
-
-Register all tools in a directory with the server.
-
-```bash
-# Register all tools in a directory
-invarity tools register-dir ./tools
-
-# Continue on errors (don't stop at first failure)
-invarity tools register-dir ./tools --continue-on-error
-
-# JSON output
-invarity tools register-dir ./tools --json
-```
-
-Tools are validated locally before registration. Up to 4 tools are registered concurrently for performance.
-
----
-
-## Toolset Management
-
-Toolsets group related tools together with environment bindings and optional policy references.
-
-### `invarity toolsets validate`
-
-Validate a toolset manifest against the Invarity Toolset Schema.
-
-```bash
-# Validate a toolset
-invarity toolsets validate -f toolset.yaml
-
-# JSON output
-invarity toolsets validate -f toolset.json --json
-```
-
-### `invarity toolsets apply`
-
-Apply a toolset to the server.
-
-```bash
-# Apply a toolset
-invarity toolsets apply -f toolset.yaml
-
-# Override environment and status
-invarity toolsets apply -f toolset.yaml --env prod --status ACTIVE
-
-# JSON output
-invarity toolsets apply -f toolset.yaml --json
-```
-
-### `invarity toolsets lint`
-
-Lint a toolset against a tools directory to verify all tool references exist.
-
-```bash
-# Lint toolset against tools directory
-invarity toolsets lint -f toolset.yaml --tools-dir ./tools
-
-# JSON output
-invarity toolsets lint -f toolset.yaml --tools-dir ./tools --json
-```
-
-**Lint checks:**
-- All tool references (`id@version`) exist in the tools directory
-- Reports missing tools (errors)
-- Reports unreferenced tools (warnings)
-- Reports invalid tool files that couldn't be parsed
-- Reports tools missing `invarity.id` or `invarity.version`
 
 ---
 
@@ -441,59 +533,7 @@ invarity policy promote "$VERSION" --active
 echo "Policy $VERSION activated"
 ```
 
-#### Handling Fuzzy Policies
-
-```bash
-# Apply policy with fuzzy terms
-invarity policy apply -f policy.fuzzy.yaml --org my-org
-
-# Output:
-# ✓ Policy applied successfully
-#   Policy Version:  pol_xyz789
-#   Status:          READY
-#
-# Fuzziness Report
-#   Score: 0.65
-#   Unresolved Terms: 3
-#   Required Variables: 2
-
-# Get detailed fuzziness report
-invarity policy fuzziness pol_xyz789
-
-# Output shows what needs resolution before the policy
-# can make deterministic decisions
-```
-
 ---
-
-### `invarity audit show`
-
-Retrieve an audit record by ID.
-
-```bash
-# Show audit record
-invarity audit show abc123
-
-# JSON output
-invarity audit show abc123 --json
-```
-
-### `invarity version`
-
-Display version information.
-
-```bash
-invarity version
-invarity version --json
-```
-
-## Exit Codes
-
-| Code | Meaning |
-|------|---------|
-| `0` | Success |
-| `1` | Validation error (invalid input, schema violation) |
-| `2` | Network/server error (connection failed, server error) |
 
 ## Tool Manifest Schema
 
@@ -518,6 +558,8 @@ parameters:
 invarity:
   id: my.tool.id           # Unique identifier (3-128 chars)
   version: 1.0.0           # Semantic version
+  # schema_hash is computed automatically if not provided
+  # schema_hash: sha256:<hex>
   risk:
     operation: write       # read, write, delete, execute
     side_effect_scope: external  # none, internal, external, global
@@ -528,6 +570,16 @@ invarity:
     money_movement: true
     reversibility: partially_reversible  # reversible, partially_reversible, irreversible
 ```
+
+### Schema Hash Computation
+
+The `schema_hash` field provides a content-addressable identifier for the tool schema. If not provided, the CLI computes it automatically as:
+
+```
+sha256:<hex of canonicalized JSON of the invarity block>
+```
+
+The canonical form has sorted keys and no extra whitespace.
 
 ### Risk Metadata
 
@@ -605,63 +657,52 @@ spec:
 
 ## Examples
 
-### Evaluate a Refund Request
+### Complete Tool Registration Workflow
 
 ```bash
-# Create request file
-cat > request.json << 'EOF'
-{
-  "tool_name": "stripe.refund_payment",
-  "parameters": {
-    "payment_id": "pi_abc123",
-    "amount": 15000,
-    "currency": "USD",
-    "reason": "customer_request"
-  },
-  "context": {
-    "user_id": "user_123",
-    "session_id": "sess_456"
-  }
-}
-EOF
+# 1. Validate tools locally
+invarity tools validate-dir ./tools
 
-# Evaluate
-invarity simulate -f request.json --explain
+# 2. Register all tools
+invarity tools register-dir ./tools --principal my-agent
+
+# 3. Lint toolset against tools
+invarity toolsets lint -f toolset.yaml --tools-dir ./tools
+
+# 4. Apply toolset (will verify tools are registered)
+invarity toolsets apply -f toolset.yaml --principal my-agent
 ```
 
-### Validate and Register a Tool
+### One-Step Toolset Deployment
 
 ```bash
-# Validate first
-invarity tools validate -f tool.yaml
-
-# If valid, register
-invarity tools register -f tool.yaml
+# Register referenced tools and apply toolset in one command
+invarity toolsets apply -f toolset.yaml --principal my-agent --tools-dir ./tools
 ```
 
 ### Scripting with JSON Output
 
 ```bash
-# Get decision as JSON for processing
-RESULT=$(invarity simulate -f request.json --json)
-DECISION=$(echo "$RESULT" | jq -r '.decision')
+# Get registration result as JSON
+RESULT=$(invarity tools register -f tool.yaml --principal my-agent --json)
+TOOL_ID=$(echo "$RESULT" | jq -r '.tool_id')
+SCHEMA_HASH=$(echo "$RESULT" | jq -r '.schema_hash')
 
-if [ "$DECISION" = "deny" ]; then
-  echo "Tool call blocked"
-  exit 1
-fi
+echo "Registered tool: $TOOL_ID with hash: $SCHEMA_HASH"
 ```
 
-### CI/CD Validation
+### CI/CD Tool Validation
 
 ```bash
+#!/bin/bash
+set -e
+
 # Validate all tool manifests in a directory
-for f in tools/*.yaml; do
-  if ! invarity tools validate -f "$f"; then
-    echo "Invalid: $f"
-    exit 1
-  fi
-done
+invarity tools validate-dir ./tools
+
+# Lint toolset against tools
+invarity toolsets lint -f toolset.yaml --tools-dir ./tools
+
 echo "All manifests valid"
 ```
 

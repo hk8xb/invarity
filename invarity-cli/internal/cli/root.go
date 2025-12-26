@@ -17,10 +17,12 @@ var (
 	Version = "dev"
 
 	// Global flags
-	cfgServer string
-	cfgAPIKey string
-	cfgTrace  bool
-	cfgJSON   bool
+	cfgServer    string
+	cfgAPIKey    string
+	cfgTenant    string
+	cfgPrincipal string
+	cfgTrace     bool
+	cfgJSON      bool
 
 	// Colors for output
 	successColor = color.New(color.FgGreen)
@@ -46,9 +48,14 @@ var RootCmd = &cobra.Command{
 It interfaces with the Invarity server to evaluate tool calls, register tools,
 apply policies, and retrieve audit records.
 
+Tool Registration:
+  Tools are registered to a principal-scoped registry. The "register" command
+  validates locally, computes schema_hash if missing, then stores in the registry.
+  Registration is scoped to a tenant and principal.
+
 Configuration can be provided via:
   - Command-line flags (highest priority)
-  - Environment variables (INVARITY_SERVER, INVARITY_API_KEY)
+  - Environment variables (INVARITY_SERVER, INVARITY_API_KEY, INVARITY_TENANT_ID, INVARITY_PRINCIPAL_ID)
   - Config file (~/.invarity/config.yaml)`,
 	SilenceUsage:  true,
 	SilenceErrors: true,
@@ -58,6 +65,8 @@ func init() {
 	// Global flags
 	RootCmd.PersistentFlags().StringVar(&cfgServer, "server", "", "Invarity server URL (default: http://localhost:8080)")
 	RootCmd.PersistentFlags().StringVar(&cfgAPIKey, "api-key", "", "API key for authentication")
+	RootCmd.PersistentFlags().StringVar(&cfgTenant, "tenant", "", "Default tenant ID")
+	RootCmd.PersistentFlags().StringVar(&cfgPrincipal, "principal", "", "Default principal ID")
 	RootCmd.PersistentFlags().BoolVar(&cfgTrace, "trace", false, "Print HTTP request/response metadata")
 	RootCmd.PersistentFlags().BoolVar(&cfgJSON, "json", false, "Output raw JSON response")
 
@@ -92,6 +101,12 @@ func loadConfig() (*config.Config, error) {
 	}
 	if cfgAPIKey != "" {
 		cfg.APIKey = cfgAPIKey
+	}
+	if cfgTenant != "" {
+		cfg.TenantID = cfgTenant
+	}
+	if cfgPrincipal != "" {
+		cfg.PrincipalID = cfgPrincipal
 	}
 	cfg.Trace = cfgTrace
 	cfg.JSON = cfgJSON

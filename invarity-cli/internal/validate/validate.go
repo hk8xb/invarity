@@ -2,12 +2,15 @@
 package validate
 
 import (
+	"crypto/sha256"
 	"embed"
+	"encoding/hex"
 	"encoding/json"
 	"fmt"
 	"io/fs"
 	"os"
 	"path/filepath"
+	"sort"
 	"strings"
 
 	"github.com/santhosh-tekuri/jsonschema/v5"
@@ -577,4 +580,159 @@ func LintToolset(toolset *Toolset, toolsDir string) (*LintResult, error) {
 	}
 
 	return result, nil
+}
+
+// NormalizeToolEnums normalizes enum values in the tool manifest to lowercase.
+// This includes operation, side_effect_scope, resource_scope, base_risk, data_class, reversibility.
+func NormalizeToolEnums(tool map[string]interface{}) map[string]interface{} {
+	invarity, ok := tool["invarity"].(map[string]interface{})
+	if !ok {
+		return tool
+	}
+
+	risk, ok := invarity["risk"].(map[string]interface{})
+	if !ok {
+		return tool
+	}
+
+	// List of enum fields to normalize to lowercase
+	enumFields := []string{
+		"operation",
+		"side_effect_scope",
+		"resource_scope",
+		"base_risk",
+		"data_class",
+		"reversibility",
+	}
+
+	for _, field := range enumFields {
+		if val, ok := risk[field].(string); ok {
+			risk[field] = strings.ToLower(val)
+		}
+	}
+
+	invarity["risk"] = risk
+	tool["invarity"] = invarity
+	return tool
+}
+
+// EnsureSchemaHash computes and adds schema_hash to the tool if missing.
+// The schema_hash is computed as: sha256(<canonicalized JSON of the invarity block>)
+// Format: "sha256:<hex>"
+func EnsureSchemaHash(tool map[string]interface{}) (map[string]interface{}, error) {
+	invarity, ok := tool["invarity"].(map[string]interface{})
+	if !ok {
+		return tool, nil
+	}
+
+	// Check if schema_hash already exists
+	if _, exists := invarity["schema_hash"]; exists {
+		return tool, nil
+	}
+
+	// Compute schema_hash from the invarity block (excluding schema_hash itself)
+	hash, err := ComputeSchemaHash(invarity)
+	if err != nil {
+		return nil, err
+	}
+
+	invarity["schema_hash"] = hash
+	tool["invarity"] = invarity
+	return tool, nil
+}
+
+// ComputeSchemaHash computes the SHA256 hash of a canonicalized JSON representation.
+// The canonical form has sorted keys and no extra whitespace.
+// Returns format: "sha256:<hex>"
+func ComputeSchemaHash(data map[string]interface{}) (string, error) {
+	// Create a copy without schema_hash to avoid circular dependency
+	dataCopy := make(map[string]interface{})
+	for k, v := range data {
+		if k != "schema_hash" {
+			dataCopy[k] = v
+		}
+	}
+
+	canonical, err := canonicalJSON(dataCopy)
+	if err != nil {
+		return "", fmt.Errorf("failed to canonicalize JSON: %w", err)
+	}
+
+	hash := sha256.Sum256(canonical)
+	return fmt.Sprintf("sha256:%s", hex.EncodeToString(hash[:])), nil
+}
+
+// canonicalJSON produces a canonical JSON representation with sorted keys.
+func canonicalJSON(v interface{}) ([]byte, error) {
+	// First marshal to get the structure
+	data, err := json.Marshal(v)
+	if err != nil {
+		return nil, err
+	}
+
+	// Unmarshal into interface{} to normalize
+	var normalized interface{}
+	if err := json.Unmarshal(data, &normalized); err != nil {
+		return nil, err
+	}
+
+	// Re-marshal with sorted keys
+	return marshalCanonical(normalized)
+}
+
+// marshalCanonical produces canonical JSON with sorted keys.
+func marshalCanonical(v interface{}) ([]byte, error) {
+	switch val := v.(type) {
+	case map[string]interface{}:
+		// Sort keys
+		keys := make([]string, 0, len(val))
+		for k := range val {
+			keys = append(keys, k)
+		}
+		sort.Strings(keys)
+
+		// Build canonical object
+		var buf strings.Builder
+		buf.WriteString("{")
+		for i, k := range keys {
+			if i > 0 {
+				buf.WriteString(",")
+			}
+			// Marshal key
+			keyJSON, err := json.Marshal(k)
+			if err != nil {
+				return nil, err
+			}
+			buf.Write(keyJSON)
+			buf.WriteString(":")
+			// Marshal value recursively
+			valJSON, err := marshalCanonical(val[k])
+			if err != nil {
+				return nil, err
+			}
+			buf.Write(valJSON)
+		}
+		buf.WriteString("}")
+		return []byte(buf.String()), nil
+
+	case []interface{}:
+		var buf strings.Builder
+		buf.WriteString("[")
+		for i, elem := range val {
+			if i > 0 {
+				buf.WriteString(",")
+			}
+			elemJSON, err := marshalCanonical(elem)
+			if err != nil {
+				return nil, err
+			}
+			buf.Write(elemJSON)
+		}
+		buf.WriteString("]")
+		return []byte(buf.String()), nil
+
+	default:
+		// For primitives (string, number, bool, null), use standard marshal
+		return json.Marshal(val)
+	}
 }

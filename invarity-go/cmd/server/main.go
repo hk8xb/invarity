@@ -18,7 +18,6 @@ import (
 	"invarity/internal/firewall"
 	invarhttp "invarity/internal/http"
 	"invarity/internal/llm"
-	"invarity/internal/policy"
 	"invarity/internal/registry"
 )
 
@@ -54,10 +53,6 @@ func run() error {
 
 	// Initialize stores
 	registryStore := registry.NewInMemoryStoreWithDefaults()
-	policyStore := policy.NewCachedStore(
-		policy.NewInMemoryStoreWithDefaults(),
-		cfg.CacheTTL,
-	)
 	auditStore := audit.NewInMemoryStore()
 
 	// Initialize LLM clients
@@ -75,23 +70,14 @@ func run() error {
 		Timeout: 30 * time.Second,
 	})
 
-	arbiterClient := llm.NewClient(llm.ClientConfig{
-		BaseURL: cfg.QwenBaseURL,
-		APIKey:  cfg.QwenAPIKey,
-		Model:   "qwen",
-		Timeout: 60 * time.Second,
-	})
-
 	// Initialize pipeline
 	pipeline := firewall.NewPipeline(firewall.PipelineConfig{
 		Config:          cfg,
 		Logger:          logger,
 		RegistryStore:   registryStore,
-		PolicyStore:     policyStore,
 		AuditStore:      auditStore,
 		AlignmentClient: alignmentClient,
 		ThreatClient:    threatClient,
-		ArbiterClient:   arbiterClient,
 	})
 
 	// Initialize router

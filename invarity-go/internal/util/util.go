@@ -103,6 +103,7 @@ func TruncateString(s string, maxLen int) string {
 		return s
 	}
 	if maxLen <= 3 {
+		// Not enough room for content + ellipsis, just truncate
 		return s[:maxLen]
 	}
 	return s[:maxLen-3] + "..."

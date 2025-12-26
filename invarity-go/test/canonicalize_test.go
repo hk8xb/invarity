@@ -12,13 +12,13 @@ func TestTruncateString(t *testing.T) {
 		maxLen   int
 		expected string
 	}{
-		{"hello", 10, "hello"},
-		{"hello world", 5, "he..."},
-		{"hi", 2, "hi"},
-		{"hello", 3, "..."},
-		{"", 10, ""},
-		{"a", 1, "a"},
-		{"ab", 1, "a"},
+		{"hello", 10, "hello"},       // Not truncated
+		{"hello world", 5, "he..."},  // Truncated with ellipsis
+		{"hi", 2, "hi"},              // Not truncated
+		{"hello", 3, "hel"},          // Truncated, no room for ellipsis
+		{"", 10, ""},                 // Empty string
+		{"a", 1, "a"},                // Not truncated
+		{"ab", 1, "a"},               // Truncated, no room for ellipsis
 	}
 
 	for _, tt := range tests {

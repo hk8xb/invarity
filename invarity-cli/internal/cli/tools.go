@@ -21,9 +21,12 @@ var toolsCmd = &cobra.Command{
 }
 
 var (
-	toolsValidateFile     string
-	toolsRegisterFile     string
-	toolsContinueOnError  bool
+	toolsValidateFile    string
+	toolsRegisterFile    string
+	toolsRegisterStdin   bool
+	toolsTenant          string
+	toolsPrincipal       string
+	toolsContinueOnError bool
 )
 
 var toolsValidateCmd = &cobra.Command{
@@ -39,13 +42,29 @@ Supports both YAML and JSON formats. Returns a non-zero exit code if validation 
 
 var toolsRegisterCmd = &cobra.Command{
 	Use:   "register",
-	Short: "Register a tool with the server",
-	Long: `Registers a tool manifest with the Invarity server.
+	Short: "Register a tool with the registry",
+	Long: `Validates a tool manifest locally, computes schema_hash if missing, then registers
+with the Invarity registry.
 
-The manifest is validated locally before being sent to the server.
-If the server does not yet support tool registration, a helpful message is displayed.`,
-	Example: `  invarity tools register -f tool.yaml
-  invarity tools register -f tool.json --json`,
+Registration is scoped to a tenant and principal. The tool is validated against
+the embedded JSON schema before any network calls are made.
+
+Schema Hash Computation:
+  If the tool does not include invarity.schema_hash, the CLI computes it as:
+  sha256(<canonicalized JSON of invarity block>)
+
+Exit Codes:
+  0 - Success
+  1 - Validation failed (no network calls made)
+  2 - Network/server error`,
+	Example: `  # Register a tool (requires --principal)
+  invarity tools register -f tool.yaml --principal my-agent
+
+  # Register with explicit tenant
+  invarity tools register -f tool.yaml --tenant acme --principal my-agent
+
+  # JSON output for scripting
+  invarity tools register -f tool.json --principal my-agent --json`,
 	RunE: runToolsRegister,
 }
 
@@ -68,10 +87,25 @@ var toolsRegisterDirCmd = &cobra.Command{
 	Short: "Register all tools in a directory",
 	Long: `Recursively finds and registers all tool manifests in a directory.
 
-Each file is validated before registration. By default, stops on first error.
-Use --continue-on-error to continue registering after failures.`,
-	Example: `  invarity tools register-dir ./tools
-  invarity tools register-dir ./tools --continue-on-error`,
+Each file is validated locally before registration. By default, if any file
+fails validation, registration is aborted (no tools are registered).
+
+Use --continue-on-error to register valid tools even when some fail validation.
+
+Registration is scoped to a tenant and principal.
+
+Exit Codes:
+  0 - All tools registered successfully
+  1 - Validation failed (at least one invalid file)
+  2 - Network/server error`,
+	Example: `  # Register all tools in a directory
+  invarity tools register-dir ./tools --principal my-agent
+
+  # Continue even if some files are invalid
+  invarity tools register-dir ./tools --principal my-agent --continue-on-error
+
+  # With explicit tenant
+  invarity tools register-dir ./tools --tenant acme --principal my-agent`,
 	Args: cobra.ExactArgs(1),
 	RunE: runToolsRegisterDir,
 }
@@ -82,11 +116,15 @@ func init() {
 	toolsValidateCmd.MarkFlagRequired("file")
 
 	// Register command
-	toolsRegisterCmd.Flags().StringVarP(&toolsRegisterFile, "file", "f", "", "Path to tool manifest file (required)")
-	toolsRegisterCmd.MarkFlagRequired("file")
+	toolsRegisterCmd.Flags().StringVarP(&toolsRegisterFile, "file", "f", "", "Path to tool manifest file")
+	toolsRegisterCmd.Flags().BoolVar(&toolsRegisterStdin, "stdin", false, "Read tool manifest from stdin")
+	toolsRegisterCmd.Flags().StringVar(&toolsTenant, "tenant", "", "Tenant ID (uses config default if not specified)")
+	toolsRegisterCmd.Flags().StringVar(&toolsPrincipal, "principal", "", "Principal ID (required unless config default is set)")
 
 	// Register-dir command
-	toolsRegisterDirCmd.Flags().BoolVar(&toolsContinueOnError, "continue-on-error", false, "Continue registering after failures")
+	toolsRegisterDirCmd.Flags().BoolVar(&toolsContinueOnError, "continue-on-error", false, "Continue registering after validation failures")
+	toolsRegisterDirCmd.Flags().StringVar(&toolsTenant, "tenant", "", "Tenant ID (uses config default if not specified)")
+	toolsRegisterDirCmd.Flags().StringVar(&toolsPrincipal, "principal", "", "Principal ID (required unless config default is set)")
 
 	// Add subcommands
 	toolsCmd.AddCommand(toolsValidateCmd)
@@ -140,25 +178,70 @@ func runToolsValidate(cmd *cobra.Command, args []string) error {
 }
 
 func runToolsRegister(cmd *cobra.Command, args []string) error {
+	// Validate input source
+	if toolsRegisterFile == "" && !toolsRegisterStdin {
+		return fmt.Errorf("either --file or --stdin is required")
+	}
+	if toolsRegisterFile != "" && toolsRegisterStdin {
+		return fmt.Errorf("cannot use both --file and --stdin")
+	}
+
 	cfg, err := loadConfig()
 	if err != nil {
 		return err
 	}
 
-	if err := cfg.ValidateWithAuth(); err != nil {
+	// Apply flag overrides
+	if toolsTenant != "" {
+		cfg.TenantID = toolsTenant
+	}
+	if toolsPrincipal != "" {
+		cfg.PrincipalID = toolsPrincipal
+	}
+
+	// Validate configuration
+	if err := cfg.ValidateForTools(); err != nil {
 		return err
 	}
 
+	// Initialize validator
 	validator, err := validate.NewValidator()
 	if err != nil {
 		printError("Failed to initialize validator: %v", err)
 		os.Exit(ExitNetworkError)
 	}
 
-	result, err := validator.ValidateFile(toolsRegisterFile)
-	if err != nil {
-		printError("Validation error: %v", err)
-		os.Exit(ExitValidationError)
+	// Parse and validate tool
+	var tool map[string]interface{}
+	var result *validate.ValidationResult
+
+	if toolsRegisterStdin {
+		// Read from stdin
+		data, err := os.ReadFile("/dev/stdin")
+		if err != nil {
+			printError("Failed to read from stdin: %v", err)
+			os.Exit(ExitValidationError)
+		}
+		result, err = validator.ValidateJSON(data)
+		if err != nil {
+			printError("Validation error: %v", err)
+			os.Exit(ExitValidationError)
+		}
+		if err := json.Unmarshal(data, &tool); err != nil {
+			printError("Invalid JSON: %v", err)
+			os.Exit(ExitValidationError)
+		}
+	} else {
+		result, err = validator.ValidateFile(toolsRegisterFile)
+		if err != nil {
+			printError("Validation error: %v", err)
+			os.Exit(ExitValidationError)
+		}
+		tool, err = validate.ParseToolFile(toolsRegisterFile)
+		if err != nil {
+			printError("Failed to parse tool file: %v", err)
+			os.Exit(ExitValidationError)
+		}
 	}
 
 	if !result.Valid {
@@ -173,9 +256,11 @@ func runToolsRegister(cmd *cobra.Command, args []string) error {
 		os.Exit(ExitValidationError)
 	}
 
-	tool, err := validate.ParseToolFile(toolsRegisterFile)
+	// Normalize enums to lowercase and compute schema_hash if missing
+	tool = validate.NormalizeToolEnums(tool)
+	tool, err = validate.EnsureSchemaHash(tool)
 	if err != nil {
-		printError("Failed to parse tool file: %v", err)
+		printError("Failed to compute schema_hash: %v", err)
 		os.Exit(ExitValidationError)
 	}
 
@@ -184,12 +269,18 @@ func runToolsRegister(cmd *cobra.Command, args []string) error {
 	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
 	defer cancel()
 
-	respBody, err := c.RegisterTool(ctx, tool)
+	// Use scoped endpoint if tenant is specified, otherwise use default tenant
+	tenantID := cfg.TenantID
+	if tenantID == "" {
+		tenantID = "default"
+	}
+
+	regResp, rawJSON, err := c.RegisterToolScoped(ctx, tenantID, cfg.PrincipalID, tool)
 	if err != nil {
 		if client.IsNotSupportedError(err) {
-			printWarn("Server does not support tool registration yet.")
+			printWarn("Server does not support principal-scoped tool registration yet.")
 			printInfo("The tool manifest is valid and ready to be registered when the server supports it.")
-			return nil
+			os.Exit(ExitNetworkError)
 		}
 		printError("Registration failed: %v", err)
 		os.Exit(ExitNetworkError)
@@ -197,11 +288,11 @@ func runToolsRegister(cmd *cobra.Command, args []string) error {
 
 	// JSON output
 	if cfgJSON {
-		printJSON(respBody)
+		printJSON(rawJSON)
 		return nil
 	}
 
-	// Get tool name for output
+	// Human-readable output
 	toolName := ""
 	if name, ok := tool["name"].(string); ok {
 		toolName = name
@@ -211,6 +302,12 @@ func runToolsRegister(cmd *cobra.Command, args []string) error {
 		printSuccess("Tool '%s' registered successfully", toolName)
 	} else {
 		printSuccess("Tool registered successfully")
+	}
+	printKeyValue("Tool ID", regResp.ToolID)
+	printKeyValue("Version", regResp.Version)
+	printKeyValue("Schema Hash", regResp.SchemaHash)
+	if regResp.CreatedAt != "" {
+		printKeyValue("Created At", regResp.CreatedAt)
 	}
 
 	return nil
@@ -324,10 +421,12 @@ func runToolsValidateDir(cmd *cobra.Command, args []string) error {
 
 // RegisterResult tracks results for a single registration.
 type RegisterResult struct {
-	File    string `json:"file"`
-	Success bool   `json:"success"`
-	Error   string `json:"error,omitempty"`
-	ToolID  string `json:"tool_id,omitempty"`
+	File       string `json:"file"`
+	Success    bool   `json:"success"`
+	Error      string `json:"error,omitempty"`
+	ToolID     string `json:"tool_id,omitempty"`
+	Version    string `json:"version,omitempty"`
+	SchemaHash string `json:"schema_hash,omitempty"`
 }
 
 func runToolsRegisterDir(cmd *cobra.Command, args []string) error {
@@ -338,7 +437,16 @@ func runToolsRegisterDir(cmd *cobra.Command, args []string) error {
 		return err
 	}
 
-	if err := cfg.ValidateWithAuth(); err != nil {
+	// Apply flag overrides
+	if toolsTenant != "" {
+		cfg.TenantID = toolsTenant
+	}
+	if toolsPrincipal != "" {
+		cfg.PrincipalID = toolsPrincipal
+	}
+
+	// Validate configuration
+	if err := cfg.ValidateForTools(); err != nil {
 		return err
 	}
 
@@ -359,27 +467,63 @@ func runToolsRegisterDir(cmd *cobra.Command, args []string) error {
 		os.Exit(ExitNetworkError)
 	}
 
-	c := newClient(cfg)
-
 	// First, validate all files
 	validFiles := make([]string, 0, len(files))
 	invalidFiles := make([]string, 0)
+	var invalidDetails []map[string]interface{}
 
 	for _, file := range files {
 		vr, err := validator.ValidateFile(file)
-		if err != nil || !vr.Valid {
+		if err != nil {
 			invalidFiles = append(invalidFiles, file)
+			invalidDetails = append(invalidDetails, map[string]interface{}{
+				"file":  file,
+				"error": err.Error(),
+			})
+		} else if !vr.Valid {
+			invalidFiles = append(invalidFiles, file)
+			errors := make([]string, 0, len(vr.Errors))
+			for _, e := range vr.Errors {
+				errors = append(errors, e.Error())
+			}
+			invalidDetails = append(invalidDetails, map[string]interface{}{
+				"file":   file,
+				"errors": errors,
+			})
 		} else {
 			validFiles = append(validFiles, file)
 		}
 	}
 
+	// If any invalid and not continuing on error, abort
 	if len(invalidFiles) > 0 && !toolsContinueOnError {
 		printError("Validation failed for %d files - aborting registration", len(invalidFiles))
-		for _, f := range invalidFiles {
-			fmt.Fprintf(os.Stderr, "  • %s\n", f)
+		printSection("Invalid Files")
+		for _, detail := range invalidDetails {
+			file := detail["file"].(string)
+			fmt.Fprintf(os.Stderr, "  • %s\n", errorColor.Sprint(file))
+			if errors, ok := detail["errors"].([]string); ok {
+				for _, e := range errors {
+					dimColor.Fprintf(os.Stderr, "      %s\n", e)
+				}
+			} else if errStr, ok := detail["error"].(string); ok {
+				dimColor.Fprintf(os.Stderr, "      %s\n", errStr)
+			}
 		}
 		os.Exit(ExitValidationError)
+	}
+
+	if len(validFiles) == 0 {
+		printError("No valid tool files to register")
+		os.Exit(ExitValidationError)
+	}
+
+	c := newClient(cfg)
+
+	// Use default tenant if not specified
+	tenantID := cfg.TenantID
+	if tenantID == "" {
+		tenantID = "default"
 	}
 
 	// Register with limited concurrency
@@ -403,7 +547,7 @@ func runToolsRegisterDir(cmd *cobra.Command, args []string) error {
 			mu.Lock()
 			if serverNotSupported {
 				mu.Unlock()
-				result.Error = "server does not support tool registration"
+				result.Error = "server does not support principal-scoped tool registration"
 				results[idx] = result
 				return
 			}
@@ -416,10 +560,19 @@ func runToolsRegisterDir(cmd *cobra.Command, args []string) error {
 				return
 			}
 
+			// Normalize and ensure schema_hash
+			tool = validate.NormalizeToolEnums(tool)
+			tool, err = validate.EnsureSchemaHash(tool)
+			if err != nil {
+				result.Error = fmt.Sprintf("failed to compute schema_hash: %v", err)
+				results[idx] = result
+				return
+			}
+
 			ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
 			defer cancel()
 
-			_, err = c.RegisterTool(ctx, tool)
+			regResp, _, err := c.RegisterToolScoped(ctx, tenantID, cfg.PrincipalID, tool)
 			if err != nil {
 				if client.IsNotSupportedError(err) {
 					mu.Lock()
@@ -429,11 +582,9 @@ func runToolsRegisterDir(cmd *cobra.Command, args []string) error {
 				result.Error = err.Error()
 			} else {
 				result.Success = true
-				if invarity, ok := tool["invarity"].(map[string]interface{}); ok {
-					if id, ok := invarity["id"].(string); ok {
-						result.ToolID = id
-					}
-				}
+				result.ToolID = regResp.ToolID
+				result.Version = regResp.Version
+				result.SchemaHash = regResp.SchemaHash
 			}
 			results[idx] = result
 		}(i, file)
@@ -462,8 +613,10 @@ func runToolsRegisterDir(cmd *cobra.Command, args []string) error {
 			"success":       successCount,
 			"failed":        failureCount,
 			"skipped":       len(invalidFiles),
+			"tenant_id":     tenantID,
+			"principal_id":  cfg.PrincipalID,
 			"results":       results,
-			"invalid_files": invalidFiles,
+			"invalid_files": invalidDetails,
 		}
 		jsonOut, _ := json.MarshalIndent(output, "", "  ")
 		printJSON(jsonOut)
@@ -475,13 +628,15 @@ func runToolsRegisterDir(cmd *cobra.Command, args []string) error {
 
 	// Human-readable output
 	if serverNotSupported {
-		printWarn("Server does not support tool registration yet.")
+		printWarn("Server does not support principal-scoped tool registration yet.")
 		printInfo("All %d tool manifests are valid and ready to be registered when the server supports it.", len(validFiles))
 		os.Exit(ExitNetworkError)
 	}
 
 	printSection("Registration Summary")
 	printKeyValue("Directory", dir)
+	printKeyValue("Tenant", tenantID)
+	printKeyValue("Principal", cfg.PrincipalID)
 	printKeyValue("Total Files", fmt.Sprintf("%d", len(files)))
 	printKeyValue("Validated", fmt.Sprintf("%d", len(validFiles)))
 	if len(invalidFiles) > 0 {

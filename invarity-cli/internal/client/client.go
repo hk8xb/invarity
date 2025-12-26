@@ -241,7 +241,52 @@ func (c *Client) Evaluate(ctx context.Context, request EvaluateRequest) (*Evalua
 	return &evalResp, body, nil
 }
 
-// RegisterTool registers a new tool with the server.
+// ToolRegisterRequest represents a request to register a single tool.
+type ToolRegisterRequest struct {
+	Tool map[string]interface{} `json:"tool"`
+}
+
+// ToolRegisterResponse represents the response from registering a tool.
+type ToolRegisterResponse struct {
+	ToolID     string `json:"tool_id"`
+	Version    string `json:"version"`
+	SchemaHash string `json:"schema_hash"`
+	Stored     bool   `json:"stored"`
+	S3URI      string `json:"s3_uri,omitempty"`
+	CreatedAt  string `json:"created_at,omitempty"`
+}
+
+// ToolBatchUpsertRequest represents a request to register multiple tools.
+type ToolBatchUpsertRequest struct {
+	Tools  []map[string]interface{} `json:"tools"`
+	Source *ToolSource              `json:"source,omitempty"`
+}
+
+// ToolSource provides metadata about the source of the tools.
+type ToolSource struct {
+	Type   string `json:"type"`
+	Repo   string `json:"repo,omitempty"`
+	GitSHA string `json:"git_sha,omitempty"`
+}
+
+// ToolBatchUpsertResponse represents the response from batch upserting tools.
+type ToolBatchUpsertResponse struct {
+	Created   int                    `json:"created"`
+	Updated   int                    `json:"updated"`
+	Failed    int                    `json:"failed"`
+	Results   []ToolBatchResult      `json:"results,omitempty"`
+}
+
+// ToolBatchResult represents the result of a single tool in a batch upsert.
+type ToolBatchResult struct {
+	ToolID     string `json:"tool_id"`
+	Version    string `json:"version"`
+	SchemaHash string `json:"schema_hash,omitempty"`
+	Status     string `json:"status"` // "created", "updated", "failed"
+	Error      string `json:"error,omitempty"`
+}
+
+// RegisterTool registers a new tool with the server (legacy endpoint).
 func (c *Client) RegisterTool(ctx context.Context, tool map[string]interface{}) ([]byte, error) {
 	resp, body, err := c.doRequest(ctx, http.MethodPost, "/v1/tools", tool)
 	if err != nil {
@@ -257,6 +302,60 @@ func (c *Client) RegisterTool(ctx context.Context, tool map[string]interface{}) 
 	}
 
 	return body, nil
+}
+
+// RegisterToolScoped registers a tool scoped to a tenant and principal.
+// POST /v1/tenants/{tenant_id}/principals/{principal_id}/tools
+func (c *Client) RegisterToolScoped(ctx context.Context, tenantID, principalID string, tool map[string]interface{}) (*ToolRegisterResponse, []byte, error) {
+	path := fmt.Sprintf("/v1/tenants/%s/principals/%s/tools",
+		url.PathEscape(tenantID), url.PathEscape(principalID))
+
+	resp, body, err := c.doRequest(ctx, http.MethodPost, path, tool)
+	if err != nil {
+		return nil, nil, err
+	}
+
+	if resp.StatusCode == http.StatusNotFound {
+		return nil, nil, &NotSupportedError{Feature: "principal-scoped tool registration"}
+	}
+
+	if resp.StatusCode != http.StatusOK && resp.StatusCode != http.StatusCreated {
+		return nil, body, fmt.Errorf("server returned status %d: %s", resp.StatusCode, string(body))
+	}
+
+	var regResp ToolRegisterResponse
+	if err := json.Unmarshal(body, &regResp); err != nil {
+		return nil, body, fmt.Errorf("failed to parse response: %w", err)
+	}
+
+	return &regResp, body, nil
+}
+
+// BatchUpsertTools registers multiple tools scoped to a tenant and principal.
+// POST /v1/tenants/{tenant_id}/principals/{principal_id}/tools:batchUpsert
+func (c *Client) BatchUpsertTools(ctx context.Context, tenantID, principalID string, req *ToolBatchUpsertRequest) (*ToolBatchUpsertResponse, []byte, error) {
+	path := fmt.Sprintf("/v1/tenants/%s/principals/%s/tools:batchUpsert",
+		url.PathEscape(tenantID), url.PathEscape(principalID))
+
+	resp, body, err := c.doRequest(ctx, http.MethodPost, path, req)
+	if err != nil {
+		return nil, nil, err
+	}
+
+	if resp.StatusCode == http.StatusNotFound {
+		return nil, nil, &NotSupportedError{Feature: "batch tool registration"}
+	}
+
+	if resp.StatusCode != http.StatusOK && resp.StatusCode != http.StatusCreated {
+		return nil, body, fmt.Errorf("server returned status %d: %s", resp.StatusCode, string(body))
+	}
+
+	var batchResp ToolBatchUpsertResponse
+	if err := json.Unmarshal(body, &batchResp); err != nil {
+		return nil, body, fmt.Errorf("failed to parse response: %w", err)
+	}
+
+	return &batchResp, body, nil
 }
 
 // ApplyPolicy applies a policy to the server.
@@ -552,7 +651,7 @@ type ToolsetApplyResponse struct {
 	CreatedAt string   `json:"created_at,omitempty"`
 }
 
-// ApplyToolset applies a toolset to the server.
+// ApplyToolset applies a toolset to the server (legacy endpoint).
 func (c *Client) ApplyToolset(ctx context.Context, req *ToolsetApplyRequest) (*ToolsetApplyResponse, []byte, error) {
 	resp, body, err := c.doRequest(ctx, http.MethodPost, "/v1/toolsets/apply", req)
 	if err != nil {
@@ -561,6 +660,33 @@ func (c *Client) ApplyToolset(ctx context.Context, req *ToolsetApplyRequest) (*T
 
 	if resp.StatusCode == http.StatusNotFound {
 		return nil, nil, &NotSupportedError{Feature: "toolset application"}
+	}
+
+	if resp.StatusCode != http.StatusOK && resp.StatusCode != http.StatusCreated && resp.StatusCode != http.StatusAccepted {
+		return nil, body, fmt.Errorf("server returned status %d: %s", resp.StatusCode, string(body))
+	}
+
+	var applyResp ToolsetApplyResponse
+	if err := json.Unmarshal(body, &applyResp); err != nil {
+		return nil, body, fmt.Errorf("failed to parse response: %w", err)
+	}
+
+	return &applyResp, body, nil
+}
+
+// ApplyToolsetScoped applies a toolset scoped to a tenant and principal.
+// POST /v1/tenants/{tenant_id}/principals/{principal_id}/toolsets:apply
+func (c *Client) ApplyToolsetScoped(ctx context.Context, tenantID, principalID string, req *ToolsetApplyRequest) (*ToolsetApplyResponse, []byte, error) {
+	path := fmt.Sprintf("/v1/tenants/%s/principals/%s/toolsets:apply",
+		url.PathEscape(tenantID), url.PathEscape(principalID))
+
+	resp, body, err := c.doRequest(ctx, http.MethodPost, path, req)
+	if err != nil {
+		return nil, nil, err
+	}
+
+	if resp.StatusCode == http.StatusNotFound {
+		return nil, nil, &NotSupportedError{Feature: "principal-scoped toolset application"}
 	}
 
 	if resp.StatusCode != http.StatusOK && resp.StatusCode != http.StatusCreated && resp.StatusCode != http.StatusAccepted {

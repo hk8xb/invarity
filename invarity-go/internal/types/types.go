@@ -172,6 +172,14 @@ type ThreatResult struct {
 	Latency     Duration    `json:"latency_ms"`
 }
 
+// ConstraintsResult represents the deterministic constraint evaluation result.
+type ConstraintsResult struct {
+	Passed       bool     `json:"passed"`
+	Violations   []string `json:"violations,omitempty"`
+	MatchedRules []string `json:"matched_rules,omitempty"`
+	Latency      Duration `json:"latency_ms"`
+}
+
 // ArbiterResult represents the policy arbiter result.
 type ArbiterResult struct {
 	DerivedFacts []DerivedFact `json:"derived_facts"`
@@ -201,12 +209,11 @@ type FirewallDecisionResponse struct {
 	RequestID   string                 `json:"request_id"`
 	AuditID     string                 `json:"audit_id"`
 	Decision    Decision               `json:"decision"`
-	BaseRisk    RiskLevel              `json:"base_risk"`
+	RiskTier    RiskTier               `json:"risk_tier"`
 	Reasons     []string               `json:"reasons"`
-	Policy      *PolicyResult          `json:"policy,omitempty"`
+	Constraints *ConstraintsResult     `json:"constraints,omitempty"`
 	Alignment   *IntentAlignmentResult `json:"alignment,omitempty"`
 	Threat      *ThreatResult          `json:"threat,omitempty"`
-	Arbiter     *ArbiterResult         `json:"arbiter,omitempty"`
 	Timing      *PipelineTiming        `json:"timing,omitempty"`
 	EvaluatedAt time.Time              `json:"evaluated_at"`
 }
@@ -216,12 +223,9 @@ type PipelineTiming struct {
 	Total          Duration `json:"total_ms"`
 	Canonicalize   Duration `json:"canonicalize_ms"`
 	SchemaValidate Duration `json:"schema_validate_ms"`
-	RiskCompute    Duration `json:"risk_compute_ms"`
-	PolicyPass1    Duration `json:"policy_pass1_ms"`
+	Constraints    Duration `json:"constraints_ms"`
 	Alignment      Duration `json:"alignment_ms"`
 	ThreatSentinel Duration `json:"threat_sentinel_ms,omitempty"`
-	Arbiter        Duration `json:"arbiter_ms,omitempty"`
-	PolicyPass2    Duration `json:"policy_pass2_ms,omitempty"`
 	Aggregate      Duration `json:"aggregate_ms"`
 }
 
@@ -241,7 +245,31 @@ func (d *Duration) UnmarshalJSON(b []byte) error {
 	return nil
 }
 
+// RiskTier represents the base risk tier of a tool (used for routing decisions).
+type RiskTier string
+
+const (
+	RiskTierLow      RiskTier = "LOW"
+	RiskTierMedium   RiskTier = "MEDIUM"
+	RiskTierHigh     RiskTier = "HIGH"
+	RiskTierCritical RiskTier = "CRITICAL"
+)
+
+// ToolConstraints defines deterministic constraints for a tool.
+// These are evaluated at runtime and must pass for the tool call to proceed.
+type ToolConstraints struct {
+	AllowedEnvs       []string `json:"allowed_envs,omitempty"`        // Environments where tool can run
+	DeniedEnvs        []string `json:"denied_envs,omitempty"`         // Environments where tool is blocked
+	AllowedRoles      []string `json:"allowed_roles,omitempty"`       // Roles that can use this tool
+	DeniedRoles       []string `json:"denied_roles,omitempty"`        // Roles that cannot use this tool
+	MaxAmount         *float64 `json:"max_amount,omitempty"`          // Maximum monetary amount
+	MaxBatchSize      *int     `json:"max_batch_size,omitempty"`      // Maximum batch/bulk size
+	RequiredFields    []string `json:"required_fields,omitempty"`     // Fields that must be present in args
+	DeniedArgPatterns []string `json:"denied_arg_patterns,omitempty"` // Patterns that will cause denial
+}
+
 // RiskProfile defines the risk characteristics of a tool.
+// Note: BaseRiskLevel is the primary field used for risk tier routing.
 type RiskProfile struct {
 	MoneyMovement    bool     `json:"money_movement"`
 	PrivilegeChange  bool     `json:"privilege_change"`
@@ -249,9 +277,9 @@ type RiskProfile struct {
 	BulkOperation    bool     `json:"bulk_operation"`
 	ResourceScope    string   `json:"resource_scope,omitempty"` // "single", "tenant", "global"
 	DataClass        string   `json:"data_class,omitempty"`     // "public", "internal", "confidential", "restricted"
-	AllowedEnvs      []string `json:"allowed_envs,omitempty"`
+	AllowedEnvs      []string `json:"allowed_envs,omitempty"`   // Deprecated: use ToolConstraints.AllowedEnvs
 	RequiresApproval bool     `json:"requires_approval"`
-	BaseRiskLevel    string   `json:"base_risk_level,omitempty"` // Override if set
+	BaseRiskLevel    string   `json:"base_risk_level,omitempty"` // LOW, MEDIUM, HIGH, CRITICAL
 }
 
 // ToolRegistryEntry represents a registered tool.
@@ -262,6 +290,7 @@ type ToolRegistryEntry struct {
 	Name          string          `json:"name"`
 	Description   string          `json:"description"`
 	Schema        json.RawMessage `json:"schema"` // JSON Schema for args
+	Constraints   ToolConstraints `json:"constraints"`
 	RiskProfile   RiskProfile     `json:"risk_profile"`
 	CreatedAt     time.Time       `json:"created_at"`
 	UpdatedAt     time.Time       `json:"updated_at"`
@@ -299,12 +328,11 @@ type AuditRecord struct {
 	ToolCall     ToolCall               `json:"tool_call"`
 	UserIntent   string                 `json:"user_intent"`
 	Decision     Decision               `json:"decision"`
-	BaseRisk     RiskLevel              `json:"base_risk"`
+	RiskTier     RiskTier               `json:"risk_tier"`
 	Reasons      []string               `json:"reasons"`
-	Policy       *PolicyResult          `json:"policy,omitempty"`
+	Constraints  *ConstraintsResult     `json:"constraints,omitempty"`
 	Alignment    *IntentAlignmentResult `json:"alignment,omitempty"`
 	Threat       *ThreatResult          `json:"threat,omitempty"`
-	Arbiter      *ArbiterResult         `json:"arbiter,omitempty"`
 	Timing       *PipelineTiming        `json:"timing,omitempty"`
 	PipelineStep string                 `json:"pipeline_step"` // Where decision was made
 	CreatedAt    time.Time              `json:"created_at"`

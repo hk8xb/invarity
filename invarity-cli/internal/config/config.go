@@ -11,27 +11,31 @@ import (
 
 // Config holds the CLI configuration.
 type Config struct {
-	Server    string `mapstructure:"server"`
-	APIKey    string `mapstructure:"api_key"`
-	OrgID     string `mapstructure:"org_id"`
-	Env       string `mapstructure:"env"`
-	ProjectID string `mapstructure:"project_id"`
-	ToolsetID string `mapstructure:"toolset_id"`
-	Trace     bool   `mapstructure:"trace"`
-	JSON      bool   `mapstructure:"json"`
+	Server      string `mapstructure:"server"`
+	APIKey      string `mapstructure:"api_key"`
+	OrgID       string `mapstructure:"org_id"`
+	TenantID    string `mapstructure:"tenant_id"`
+	PrincipalID string `mapstructure:"principal_id"`
+	Env         string `mapstructure:"env"`
+	ProjectID   string `mapstructure:"project_id"`
+	ToolsetID   string `mapstructure:"toolset_id"`
+	Trace       bool   `mapstructure:"trace"`
+	JSON        bool   `mapstructure:"json"`
 }
 
 // DefaultConfig returns the default configuration.
 func DefaultConfig() *Config {
 	return &Config{
-		Server:    "http://localhost:8080",
-		APIKey:    "",
-		OrgID:     "",
-		Env:       "sandbox",
-		ProjectID: "",
-		ToolsetID: "",
-		Trace:     false,
-		JSON:      false,
+		Server:      "http://localhost:8080",
+		APIKey:      "",
+		OrgID:       "",
+		TenantID:    "",
+		PrincipalID: "",
+		Env:         "sandbox",
+		ProjectID:   "",
+		ToolsetID:   "",
+		Trace:       false,
+		JSON:        false,
 	}
 }
 
@@ -63,6 +67,8 @@ func Load() (*Config, error) {
 	v.BindEnv("server", "INVARITY_SERVER")
 	v.BindEnv("api_key", "INVARITY_API_KEY")
 	v.BindEnv("org_id", "INVARITY_ORG_ID")
+	v.BindEnv("tenant_id", "INVARITY_TENANT_ID")
+	v.BindEnv("principal_id", "INVARITY_PRINCIPAL_ID")
 	v.BindEnv("env", "INVARITY_ENV")
 	v.BindEnv("project_id", "INVARITY_PROJECT_ID")
 	v.BindEnv("toolset_id", "INVARITY_TOOLSET_ID")
@@ -127,6 +133,28 @@ func (c *Config) ValidateForPolicy() error {
 	}
 	if c.OrgID == "" {
 		return fmt.Errorf("org_id is required for policy operations (set via --org, INVARITY_ORG_ID, or config file)")
+	}
+	return nil
+}
+
+// ValidateForTools checks if the configuration is valid for tool operations.
+func (c *Config) ValidateForTools() error {
+	if err := c.ValidateWithAuth(); err != nil {
+		return err
+	}
+	if c.PrincipalID == "" {
+		return fmt.Errorf("principal_id is required for tool operations (set via --principal, INVARITY_PRINCIPAL_ID, or config file)")
+	}
+	return nil
+}
+
+// ValidateForToolsWithTenant checks if the configuration is valid for tenant-scoped tool operations.
+func (c *Config) ValidateForToolsWithTenant() error {
+	if err := c.ValidateForTools(); err != nil {
+		return err
+	}
+	if c.TenantID == "" {
+		return fmt.Errorf("tenant_id is required (set via --tenant, INVARITY_TENANT_ID, or config file)")
 	}
 	return nil
 }

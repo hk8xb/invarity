@@ -11,36 +11,30 @@ import (
 
 	"invarity/internal/audit"
 	"invarity/internal/config"
+	"invarity/internal/constraints"
 	"invarity/internal/llm"
-	"invarity/internal/policy"
 	"invarity/internal/registry"
-	"invarity/internal/risk"
 	"invarity/internal/types"
 	"invarity/internal/util"
 )
 
 // Pipeline implements the Invarity Firewall decision pipeline.
-// The pipeline follows these steps:
+// The new MVP pipeline follows these steps:
 // S0: Canonicalize & bounds-check request
 // S1: Schema Validation (deterministic)
-// S2: Base Risk Compute (deterministic)
-// S3: Policy DSL Pass 1 (deterministic)
-// S4: Intention Alignment Quorum (ALWAYS-ON)
-// S5: Threat Sentinel (conditional: base_risk >= MEDIUM)
-// S6: Policy Arbiter (conditional: base_risk >= MEDIUM AND policy needs facts)
-// S7: Policy DSL Pass 2 (conditional: if arbiter ran)
-// S8: Aggregate Decision (deterministic)
+// S2: Deterministic Constraints Evaluation
+// S3: Intent Alignment Quorum (ALWAYS-ON)
+// S4: Threat Sentinel (conditional: risk_tier >= MEDIUM)
+// S5: Aggregate Decision (deterministic)
 type Pipeline struct {
-	cfg             *config.Config
-	logger          *zap.Logger
-	registryStore   registry.Store
-	policyStore     policy.Store
-	auditStore      audit.Store
-	schemaValidator *registry.SchemaValidator
-	policyEvaluator *policy.Evaluator
-	intentQuorum    *llm.IntentQuorum
-	threatSentinel  *llm.ThreatSentinel
-	policyArbiter   *llm.PolicyArbiter
+	cfg                  *config.Config
+	logger               *zap.Logger
+	registryStore        registry.Store
+	auditStore           audit.Store
+	schemaValidator      *registry.SchemaValidator
+	constraintsEvaluator *constraints.Evaluator
+	intentQuorum         *llm.IntentQuorum
+	threatSentinel       *llm.ThreatSentinel
 }
 
 // PipelineConfig holds dependencies for the pipeline.
@@ -48,12 +42,10 @@ type PipelineConfig struct {
 	Config        *config.Config
 	Logger        *zap.Logger
 	RegistryStore registry.Store
-	PolicyStore   policy.Store
 	AuditStore    audit.Store
 	// All LLM clients use RunPod endpoints
 	AlignmentClient *llm.Client // Intent alignment quorum
 	ThreatClient    *llm.Client // Threat sentinel
-	ArbiterClient   *llm.Client // Policy arbiter
 }
 
 // NewPipeline creates a new firewall pipeline.
@@ -67,34 +59,30 @@ func NewPipeline(cfg PipelineConfig) *Pipeline {
 	}
 
 	return &Pipeline{
-		cfg:             cfg.Config,
-		logger:          cfg.Logger,
-		registryStore:   cfg.RegistryStore,
-		policyStore:     cfg.PolicyStore,
-		auditStore:      cfg.AuditStore,
-		schemaValidator: registry.NewSchemaValidator(),
-		policyEvaluator: policy.NewEvaluator(cfg.PolicyStore),
-		intentQuorum:    llm.NewIntentQuorum(cfg.AlignmentClient, intentQuorumCfg),
-		threatSentinel:  llm.NewThreatSentinel(cfg.ThreatClient),
-		policyArbiter:   llm.NewPolicyArbiter(cfg.ArbiterClient),
+		cfg:                  cfg.Config,
+		logger:               cfg.Logger,
+		registryStore:        cfg.RegistryStore,
+		auditStore:           cfg.AuditStore,
+		schemaValidator:      registry.NewSchemaValidator(),
+		constraintsEvaluator: constraints.NewEvaluator(),
+		intentQuorum:         llm.NewIntentQuorum(cfg.AlignmentClient, intentQuorumCfg),
+		threatSentinel:       llm.NewThreatSentinel(cfg.ThreatClient),
 	}
 }
 
 // PipelineState holds the state as the request moves through the pipeline.
 type PipelineState struct {
-	Request       *types.ToolCallRequest
-	RequestID     string
-	Tool          *types.ToolRegistryEntry
-	RiskResult    *risk.ComputeResult
-	PolicyResult1 *policy.EvaluationResult
-	PolicyResult2 *policy.EvaluationResult
-	Alignment     *types.IntentAlignmentResult
-	Threat        *types.ThreatResult
-	Arbiter       *types.ArbiterResult
-	Timing        *types.PipelineTiming
-	Reasons       []string
-	Decision      types.Decision
-	DecisionStep  string // Which step made the decision
+	Request      *types.ToolCallRequest
+	RequestID    string
+	Tool         *types.ToolRegistryEntry
+	RiskTier     types.RiskTier
+	Constraints  *types.ConstraintsResult
+	Alignment    *types.IntentAlignmentResult
+	Threat       *types.ThreatResult
+	Timing       *types.PipelineTiming
+	Reasons      []string
+	Decision     types.Decision
+	DecisionStep string // Which step made the decision
 }
 
 // Evaluate runs the full firewall decision pipeline.
@@ -106,6 +94,7 @@ func (p *Pipeline) Evaluate(ctx context.Context, req *types.ToolCallRequest) (*t
 		RequestID: req.RequestID,
 		Timing:    &types.PipelineTiming{},
 		Reasons:   make([]string, 0),
+		RiskTier:  types.RiskTierLow, // Default
 	}
 
 	if state.RequestID == "" {
@@ -119,23 +108,23 @@ func (p *Pipeline) Evaluate(ctx context.Context, req *types.ToolCallRequest) (*t
 		return p.buildErrorResponse(state, err, "S0_CANONICALIZE")
 	}
 
-	// S1: Schema Validation
+	// S1: Schema Validation & Tool Lookup
 	if err := p.stepSchemaValidation(ctx, state); err != nil {
 		return p.buildDenyResponse(state, "S1_SCHEMA_VALIDATION", err.Error())
 	}
 
-	// S2: Base Risk Compute
-	p.stepRiskCompute(ctx, state)
+	// Extract risk tier from tool
+	p.extractRiskTier(state)
 
-	// S3: Policy DSL Pass 1
-	if err := p.stepPolicyPass1(ctx, state); err != nil {
-		logger.Warn("policy pass 1 error", zap.Error(err))
+	// S2: Deterministic Constraints Evaluation
+	if err := p.stepConstraintsEvaluation(ctx, state); err != nil {
+		logger.Warn("constraints evaluation error", zap.Error(err))
 	}
-	if state.PolicyResult1 != nil && state.PolicyResult1.Status == types.PolicyStatusDeny {
-		return p.buildDenyResponse(state, "S3_POLICY_PASS1", state.PolicyResult1.DenyReasons...)
+	if state.Constraints != nil && !state.Constraints.Passed {
+		return p.buildDenyResponse(state, "S2_CONSTRAINTS", state.Constraints.Violations...)
 	}
 
-	// S4: Intent Alignment Quorum (ALWAYS-ON)
+	// S3: Intent Alignment Quorum (ALWAYS-ON)
 	if err := p.stepIntentAlignment(ctx, state); err != nil {
 		logger.Warn("intent alignment quorum error", zap.Error(err))
 		// On error, default to ESCALATE
@@ -146,37 +135,20 @@ func (p *Pipeline) Evaluate(ctx context.Context, req *types.ToolCallRequest) (*t
 	}
 	// Check intent alignment decision
 	if state.Alignment != nil && state.Alignment.Decision == types.IntentDecisionDeny {
-		return p.buildDenyResponse(state, "S4_INTENT_ALIGNMENT", "intent_quorum_deny")
+		return p.buildDenyResponse(state, "S3_INTENT_ALIGNMENT", "intent_quorum_deny")
 	}
 
-	// S5: Threat Sentinel (conditional: base_risk >= MEDIUM)
+	// S4: Threat Sentinel (conditional: risk_tier >= MEDIUM)
 	if p.shouldRunThreatSentinel(state) {
 		if err := p.stepThreatSentinel(ctx, state); err != nil {
 			logger.Warn("threat sentinel error", zap.Error(err))
 		}
 		if state.Threat != nil && state.Threat.Label == types.ThreatMalicious {
-			return p.buildDenyResponse(state, "S5_THREAT_SENTINEL", "threat_malicious")
+			return p.buildDenyResponse(state, "S4_THREAT_SENTINEL", "threat_malicious")
 		}
 	}
 
-	// S6: Policy Arbiter (conditional)
-	if p.shouldRunPolicyArbiter(state) {
-		if err := p.stepPolicyArbiter(ctx, state); err != nil {
-			logger.Warn("policy arbiter error", zap.Error(err))
-		}
-	}
-
-	// S7: Policy DSL Pass 2 (if arbiter ran)
-	if state.Arbiter != nil {
-		if err := p.stepPolicyPass2(ctx, state); err != nil {
-			logger.Warn("policy pass 2 error", zap.Error(err))
-		}
-		if state.PolicyResult2 != nil && state.PolicyResult2.Status == types.PolicyStatusDeny {
-			return p.buildDenyResponse(state, "S7_POLICY_PASS2", state.PolicyResult2.DenyReasons...)
-		}
-	}
-
-	// S8: Aggregate Decision
+	// S5: Aggregate Decision
 	p.stepAggregateDecision(ctx, state)
 
 	state.Timing.Total = types.Duration(time.Since(totalStart))
@@ -230,7 +202,7 @@ func (p *Pipeline) stepCanonicalize(ctx context.Context, state *PipelineState) e
 	return nil
 }
 
-// S1: Schema Validation
+// S1: Schema Validation & Tool Lookup
 func (p *Pipeline) stepSchemaValidation(ctx context.Context, state *PipelineState) error {
 	start := time.Now()
 	defer func() {
@@ -264,49 +236,62 @@ func (p *Pipeline) stepSchemaValidation(ctx context.Context, state *PipelineStat
 	return nil
 }
 
-// S2: Base Risk Compute
-func (p *Pipeline) stepRiskCompute(ctx context.Context, state *PipelineState) {
-	start := time.Now()
-	defer func() {
-		state.Timing.RiskCompute = types.Duration(time.Since(start))
-	}()
+// extractRiskTier extracts the risk tier from the tool's risk profile.
+func (p *Pipeline) extractRiskTier(state *PipelineState) {
+	if state.Tool == nil {
+		state.RiskTier = types.RiskTierMedium // Default for unknown tools
+		state.Reasons = append(state.Reasons, "unknown_tool_default_medium_risk")
+		return
+	}
 
-	state.RiskResult = risk.Compute(&risk.ComputeContext{
-		Tool:        state.Tool,
-		Args:        state.Request.ToolCall.Args,
-		Environment: state.Request.Environment,
-		Actor:       state.Request.Actor,
-	})
-
-	state.Reasons = append(state.Reasons, state.RiskResult.Factors...)
+	// Use BaseRiskLevel from risk profile
+	switch state.Tool.RiskProfile.BaseRiskLevel {
+	case "LOW":
+		state.RiskTier = types.RiskTierLow
+	case "MEDIUM":
+		state.RiskTier = types.RiskTierMedium
+	case "HIGH":
+		state.RiskTier = types.RiskTierHigh
+	case "CRITICAL":
+		state.RiskTier = types.RiskTierCritical
+	default:
+		// Infer from risk profile flags if BaseRiskLevel not set
+		if state.Tool.RiskProfile.MoneyMovement || state.Tool.RiskProfile.PrivilegeChange {
+			state.RiskTier = types.RiskTierHigh
+		} else if state.Tool.RiskProfile.Irreversible || state.Tool.RiskProfile.BulkOperation {
+			state.RiskTier = types.RiskTierMedium
+		} else {
+			state.RiskTier = types.RiskTierLow
+		}
+	}
 }
 
-// S3: Policy DSL Pass 1
-func (p *Pipeline) stepPolicyPass1(ctx context.Context, state *PipelineState) error {
+// S2: Deterministic Constraints Evaluation
+func (p *Pipeline) stepConstraintsEvaluation(ctx context.Context, state *PipelineState) error {
 	start := time.Now()
 	defer func() {
-		state.Timing.PolicyPass1 = types.Duration(time.Since(start))
+		state.Timing.Constraints = types.Duration(time.Since(start))
 	}()
 
-	result, err := p.policyEvaluator.Evaluate(ctx, &policy.EvaluationContext{
-		OrgID:       state.Request.OrgID,
-		Actor:       state.Request.Actor,
-		Environment: state.Request.Environment,
-		ToolCall:    state.Request.ToolCall,
-		Tool:        state.Tool,
-		RiskLevel:   state.RiskResult.Level,
-		UserIntent:  state.Request.UserIntent,
-	})
-
+	result, err := p.constraintsEvaluator.Evaluate(ctx, state.Tool, state.Request)
 	if err != nil {
 		return err
 	}
 
-	state.PolicyResult1 = result
+	state.Constraints = &types.ConstraintsResult{
+		Passed:       result.Passed,
+		Violations:   result.Violations,
+		MatchedRules: result.MatchedRules,
+		Latency:      types.Duration(time.Since(start)),
+	}
+
+	// Add violations to reasons
+	state.Reasons = append(state.Reasons, result.Violations...)
+
 	return nil
 }
 
-// S4: Intent Alignment Quorum
+// S3: Intent Alignment Quorum
 func (p *Pipeline) stepIntentAlignment(ctx context.Context, state *PipelineState) error {
 	start := time.Now()
 	defer func() {
@@ -336,7 +321,7 @@ func (p *Pipeline) stepIntentAlignment(ctx context.Context, state *PipelineState
 	return nil
 }
 
-// S5: Threat Sentinel
+// S4: Threat Sentinel
 func (p *Pipeline) stepThreatSentinel(ctx context.Context, state *PipelineState) error {
 	start := time.Now()
 	defer func() {
@@ -367,83 +352,12 @@ func (p *Pipeline) stepThreatSentinel(ctx context.Context, state *PipelineState)
 	return nil
 }
 
-// S6: Policy Arbiter
-func (p *Pipeline) stepPolicyArbiter(ctx context.Context, state *PipelineState) error {
-	start := time.Now()
-	defer func() {
-		state.Timing.Arbiter = types.Duration(time.Since(start))
-	}()
-
-	var requiredFacts []string
-	var policyClauses []string
-
-	if state.PolicyResult1 != nil {
-		requiredFacts = state.PolicyResult1.RequiresFact
-		policyClauses = state.PolicyResult1.MatchedRules
-	}
-
-	result, err := p.policyArbiter.Run(ctx, &llm.ArbiterRequest{
-		UserIntent:    state.Request.UserIntent,
-		ToolCall:      state.Request.ToolCall,
-		Tool:          state.Tool,
-		Actor:         state.Request.Actor,
-		Environment:   state.Request.Environment,
-		Context:       state.Request.BoundedContext,
-		RequiredFacts: requiredFacts,
-		PolicyClauses: policyClauses,
-	})
-
-	if err != nil {
-		return err
-	}
-
-	state.Arbiter = result
-	return nil
-}
-
-// S7: Policy DSL Pass 2
-func (p *Pipeline) stepPolicyPass2(ctx context.Context, state *PipelineState) error {
-	start := time.Now()
-	defer func() {
-		state.Timing.PolicyPass2 = types.Duration(time.Since(start))
-	}()
-
-	// Convert derived facts to map
-	derivedFacts := make(map[string]any)
-	if state.Arbiter != nil {
-		for _, fact := range state.Arbiter.DerivedFacts {
-			derivedFacts[fact.Key] = fact.Value
-		}
-	}
-
-	result, err := p.policyEvaluator.EvaluateWithFacts(ctx, &policy.EvaluationContext{
-		OrgID:       state.Request.OrgID,
-		Actor:       state.Request.Actor,
-		Environment: state.Request.Environment,
-		ToolCall:    state.Request.ToolCall,
-		Tool:        state.Tool,
-		RiskLevel:   state.RiskResult.Level,
-		UserIntent:  state.Request.UserIntent,
-		DerivedFact: derivedFacts,
-	})
-
-	if err != nil {
-		return err
-	}
-
-	state.PolicyResult2 = result
-	return nil
-}
-
-// S8: Aggregate Decision
+// S5: Aggregate Decision
 func (p *Pipeline) stepAggregateDecision(ctx context.Context, state *PipelineState) {
 	start := time.Now()
 	defer func() {
 		state.Timing.Aggregate = types.Duration(time.Since(start))
 	}()
-
-	// Check for any DENY signals
-	// (Already handled above, but double-check)
 
 	// Check for ESCALATE signals
 	escalate := false
@@ -460,25 +374,9 @@ func (p *Pipeline) stepAggregateDecision(ctx context.Context, state *PipelineSta
 		state.Reasons = append(state.Reasons, "threat_suspicious")
 	}
 
-	// Policy uncovered or requires facts that weren't derived
-	policyResult := state.PolicyResult1
-	if state.PolicyResult2 != nil {
-		policyResult = state.PolicyResult2
-	}
-	if policyResult != nil {
-		if policyResult.Status == types.PolicyStatusUncovered {
-			escalate = true
-			state.Reasons = append(state.Reasons, "policy_uncovered")
-		}
-		if policyResult.Status == types.PolicyStatusRequiresFact {
-			escalate = true
-			state.Reasons = append(state.Reasons, "policy_requires_facts")
-		}
-	}
-
 	// High/Critical risk with requires_approval
 	if state.Tool != nil && state.Tool.RiskProfile.RequiresApproval {
-		if state.RiskResult.Level == types.RiskHigh || state.RiskResult.Level == types.RiskCritical {
+		if state.RiskTier == types.RiskTierHigh || state.RiskTier == types.RiskTierCritical {
 			escalate = true
 			state.Reasons = append(state.Reasons, "high_risk_requires_approval")
 		}
@@ -486,10 +384,10 @@ func (p *Pipeline) stepAggregateDecision(ctx context.Context, state *PipelineSta
 
 	if escalate {
 		state.Decision = types.DecisionEscalate
-		state.DecisionStep = "S8_AGGREGATE"
+		state.DecisionStep = "S5_AGGREGATE"
 	} else {
 		state.Decision = types.DecisionAllow
-		state.DecisionStep = "S8_AGGREGATE"
+		state.DecisionStep = "S5_AGGREGATE"
 	}
 
 	// Deduplicate reasons
@@ -501,35 +399,10 @@ func (p *Pipeline) shouldRunThreatSentinel(state *PipelineState) bool {
 	if !p.cfg.EnableThreatSentinel {
 		return false
 	}
-	return risk.CompareRiskLevels(state.RiskResult.Level, types.RiskMedium)
-}
-
-// shouldRunPolicyArbiter determines if policy arbiter should run.
-func (p *Pipeline) shouldRunPolicyArbiter(state *PipelineState) bool {
-	if !p.cfg.EnablePolicyArbiter {
-		return false
-	}
-
-	// Must be medium+ risk
-	if !risk.CompareRiskLevels(state.RiskResult.Level, types.RiskMedium) {
-		return false
-	}
-
-	// Check if policy needs facts or context is fuzzy
-	if state.Request.FuzzyContext {
-		return true
-	}
-
-	if state.PolicyResult1 != nil {
-		if state.PolicyResult1.Status == types.PolicyStatusRequiresFact {
-			return true
-		}
-		if state.PolicyResult1.Status == types.PolicyStatusUncovered {
-			return true
-		}
-	}
-
-	return false
+	// Run for MEDIUM, HIGH, or CRITICAL risk tiers
+	return state.RiskTier == types.RiskTierMedium ||
+		state.RiskTier == types.RiskTierHigh ||
+		state.RiskTier == types.RiskTierCritical
 }
 
 // buildDenyResponse creates a DENY response.
@@ -556,45 +429,17 @@ func (p *Pipeline) buildResponse(state *PipelineState) (*types.FirewallDecisionR
 	// Write audit record
 	auditWriter := audit.NewWriter(p.auditStore)
 
-	riskLevel := types.RiskLow
-	if state.RiskResult != nil {
-		riskLevel = state.RiskResult.Level
-	}
-
 	resp := &types.FirewallDecisionResponse{
-		RequestID: state.RequestID,
-		Decision:  state.Decision,
-		BaseRisk:  riskLevel,
-		Reasons:   state.Reasons,
-		Timing:    state.Timing,
+		RequestID:   state.RequestID,
+		Decision:    state.Decision,
+		RiskTier:    state.RiskTier,
+		Reasons:     state.Reasons,
+		Constraints: state.Constraints,
+		Alignment:   state.Alignment,
+		Threat:      state.Threat,
+		Timing:      state.Timing,
 		EvaluatedAt: time.Now().UTC(),
 	}
-
-	// Add policy result
-	if state.PolicyResult2 != nil {
-		resp.Policy = &types.PolicyResult{
-			Version:      "1.0.0", // TODO: Get from bundle
-			Status:       state.PolicyResult2.Status,
-			MatchedRules: state.PolicyResult2.MatchedRules,
-			RequiresFact: len(state.PolicyResult2.RequiresFact) > 0,
-		}
-	} else if state.PolicyResult1 != nil {
-		resp.Policy = &types.PolicyResult{
-			Version:      "1.0.0",
-			Status:       state.PolicyResult1.Status,
-			MatchedRules: state.PolicyResult1.MatchedRules,
-			RequiresFact: len(state.PolicyResult1.RequiresFact) > 0,
-		}
-	}
-
-	// Add intent alignment result
-	resp.Alignment = state.Alignment
-
-	// Add threat result
-	resp.Threat = state.Threat
-
-	// Add arbiter result
-	resp.Arbiter = state.Arbiter
 
 	// Write audit
 	auditID, err := auditWriter.WriteFromResponse(context.Background(), state.Request, resp, state.DecisionStep)

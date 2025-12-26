@@ -41,7 +41,6 @@ type Config struct {
 
 	// Feature flags
 	EnableThreatSentinel bool
-	EnablePolicyArbiter  bool
 }
 
 // DefaultConfig returns a configuration with sensible defaults.
@@ -65,7 +64,6 @@ func DefaultConfig() *Config {
 		MaxIntentChars:       4000,
 		CacheTTL:             5 * time.Minute,
 		EnableThreatSentinel: true,
-		EnablePolicyArbiter:  true,
 	}
 }
 
@@ -167,10 +165,6 @@ func LoadFromEnv() (*Config, error) {
 
 	if v := os.Getenv("ENABLE_THREAT_SENTINEL"); v != "" {
 		cfg.EnableThreatSentinel = v == "true" || v == "1"
-	}
-
-	if v := os.Getenv("ENABLE_POLICY_ARBITER"); v != "" {
-		cfg.EnablePolicyArbiter = v == "true" || v == "1"
 	}
 
 	return cfg, cfg.Validate()
